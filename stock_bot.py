@@ -31,7 +31,7 @@ class Settings(BaseSettings):
     LIVE_TRADING_ENABLED: bool = False
     STARTING_CAPITAL: float = 100000.0  # ₹1 lakh default
     DB_PATH: str = "data/stock_bot.db"
-    SCAN_INTERVAL_MINUTES: int = 15
+    SCAN_INTERVAL_MINUTES: int = 60
     MIN_CONFIDENCE: float = 0.65
     MAX_POSITION_PCT: float = 0.05  # 5% per stock
     TRADING_MODES: list = ["swing", "intraday", "positional"]
@@ -359,7 +359,7 @@ class StockReasoningEngine:
         )
         try:
             response = self.client.messages.create(
-                model="claude-sonnet-4-20250514",
+                model="claude-haiku-4-5-20251001",
                 max_tokens=1000,
                 messages=[{"role": "user", "content": prompt}],
             )
