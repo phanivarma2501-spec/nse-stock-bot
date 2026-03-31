@@ -1,0 +1,585 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Phani Market — NSE Stock Signals</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&family=Syne:wght@400;600;800&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #080c10;
+  --surface: #0d1117;
+  --card: #111820;
+  --border: #1e2d3d;
+  --border2: #243447;
+  --green: #00d97e;
+  --green-dim: rgba(0,217,126,0.12);
+  --red: #ff4d6d;
+  --red-dim: rgba(255,77,109,0.12);
+  --amber: #f5a623;
+  --amber-dim: rgba(245,166,35,0.12);
+  --blue: #38bdf8;
+  --blue-dim: rgba(56,189,248,0.1);
+  --purple: #a78bfa;
+  --text: #e2e8f0;
+  --muted: #64748b;
+  --dim: #334155;
+}
+* { box-sizing: border-box; margin: 0; padding: 0; }
+body { background: var(--bg); color: var(--text); font-family: 'Syne', sans-serif; min-height: 100vh; overflow-x: hidden; }
+.mono { font-family: 'JetBrains Mono', monospace; }
+
+/* Topbar */
+.topbar { background: var(--surface); border-bottom: 1px solid var(--border); padding: 0 24px; height: 56px; display: flex; align-items: center; gap: 16px; position: sticky; top: 0; z-index: 100; }
+.logo { font-size: 18px; font-weight: 800; color: var(--blue); letter-spacing: -0.5px; }
+.logo span { color: var(--green); }
+.tag { font-size: 10px; padding: 2px 8px; border-radius: 10px; font-weight: 600; letter-spacing: 0.5px; }
+.tag-paper { background: var(--amber-dim); color: var(--amber); }
+.tag-phase { background: var(--blue-dim); color: var(--blue); }
+.tag-live { background: var(--green-dim); color: var(--green); }
+.spacer { flex: 1; }
+.scan-btn { background: var(--green); color: #000; border: none; padding: 8px 20px; border-radius: 6px; font-family: 'Syne', sans-serif; font-weight: 700; font-size: 13px; cursor: pointer; transition: all 0.15s; }
+.scan-btn:hover { background: #00f090; }
+.scan-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.market-status { font-size: 11px; color: var(--muted); display: flex; align-items: center; gap: 6px; }
+.status-dot { width: 7px; height: 7px; border-radius: 50%; }
+.dot-open { background: var(--green); animation: pulse 2s infinite; }
+.dot-closed { background: var(--muted); }
+@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+
+/* Layout */
+.layout { display: grid; grid-template-columns: 280px 1fr; min-height: calc(100vh - 56px); }
+
+/* Sidebar */
+.sidebar { background: var(--surface); border-right: 1px solid var(--border); padding: 16px; display: flex; flex-direction: column; gap: 12px; }
+.sidebar-section { margin-bottom: 4px; }
+.sidebar-label { font-size: 10px; text-transform: uppercase; letter-spacing: 0.8px; color: var(--muted); margin-bottom: 8px; font-weight: 600; }
+
+/* Portfolio Card */
+.portfolio-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+.portfolio-card .pval { font-size: 22px; font-weight: 800; color: var(--text); font-family: 'JetBrains Mono', monospace; }
+.portfolio-card .plabel { font-size: 10px; color: var(--muted); margin-bottom: 3px; text-transform: uppercase; letter-spacing: 0.4px; }
+.portfolio-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 10px; }
+.mini-stat { background: var(--surface); border-radius: 6px; padding: 8px 10px; }
+.mini-stat .mv { font-size: 15px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.mini-stat .ml { font-size: 10px; color: var(--muted); }
+.pos { color: var(--green); }
+.neg { color: var(--red); }
+.neu { color: var(--amber); }
+
+/* Filter */
+.filter-group { display: flex; flex-direction: column; gap: 4px; }
+.filter-btn { background: var(--card); border: 1px solid var(--border); color: var(--muted); padding: 7px 12px; border-radius: 6px; font-family: 'Syne', sans-serif; font-size: 12px; cursor: pointer; text-align: left; transition: all 0.1s; display: flex; justify-content: space-between; align-items: center; }
+.filter-btn:hover { border-color: var(--border2); color: var(--text); }
+.filter-btn.active { border-color: var(--blue); color: var(--blue); background: var(--blue-dim); }
+.filter-count { font-size: 10px; background: var(--surface); padding: 1px 6px; border-radius: 8px; }
+
+/* Watchlist */
+.watch-item { display: flex; justify-content: space-between; align-items: center; padding: 7px 0; border-bottom: 1px solid var(--border); cursor: pointer; transition: color 0.1s; }
+.watch-item:hover { color: var(--blue); }
+.watch-item:last-child { border-bottom: none; }
+.watch-sym { font-size: 12px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.watch-price { font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+.watch-chg { font-size: 10px; padding: 1px 5px; border-radius: 3px; }
+
+/* Main */
+.main { padding: 20px; display: flex; flex-direction: column; gap: 16px; overflow-y: auto; }
+
+/* Stats row */
+.stats-row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 10px; }
+.stat-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px 16px; }
+.stat-card .sv { font-size: 24px; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+.stat-card .sl { font-size: 10px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.4px; margin-bottom: 3px; }
+.stat-card .ss { font-size: 10px; color: var(--muted); margin-top: 2px; }
+
+/* Signals table */
+.signals-card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; overflow: hidden; }
+.card-header { padding: 14px 18px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 10px; }
+.card-title { font-size: 13px; font-weight: 700; }
+.card-sub { font-size: 11px; color: var(--muted); }
+.table-wrap { overflow-x: auto; }
+table { width: 100%; border-collapse: collapse; font-size: 12px; }
+th { padding: 10px 14px; text-align: left; font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--border); white-space: nowrap; background: var(--surface); }
+td { padding: 11px 14px; border-bottom: 1px solid rgba(30,45,61,0.5); vertical-align: middle; white-space: nowrap; }
+tr { transition: background 0.1s; cursor: pointer; }
+tr:hover td { background: rgba(56,189,248,0.03); }
+tr:last-child td { border-bottom: none; }
+
+/* Signal badges */
+.sig-badge { padding: 3px 10px; border-radius: 5px; font-size: 11px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.sig-strong-buy { background: var(--green-dim); color: var(--green); border: 1px solid rgba(0,217,126,0.3); }
+.sig-buy { background: rgba(0,217,126,0.07); color: #6ee7b7; border: 1px solid rgba(0,217,126,0.15); }
+.sig-hold { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(245,166,35,0.2); }
+.sig-sell { background: rgba(255,77,109,0.07); color: #fda4af; border: 1px solid rgba(255,77,109,0.15); }
+.sig-strong-sell { background: var(--red-dim); color: var(--red); border: 1px solid rgba(255,77,109,0.3); }
+
+/* Mode badge */
+.mode-badge { padding: 2px 7px; border-radius: 4px; font-size: 10px; font-weight: 600; letter-spacing: 0.3px; }
+.mode-swing { background: rgba(167,139,250,0.12); color: var(--purple); }
+.mode-intraday { background: var(--blue-dim); color: var(--blue); }
+.mode-positional { background: var(--amber-dim); color: var(--amber); }
+
+/* Sector tag */
+.sector-tag { font-size: 10px; color: var(--muted); background: var(--surface); padding: 2px 6px; border-radius: 3px; }
+
+/* Detail panel */
+.detail-panel { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 0; overflow: hidden; display: none; }
+.detail-panel.show { display: block; }
+.detail-header { padding: 16px 20px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: flex-start; }
+.detail-symbol { font-size: 20px; font-weight: 800; font-family: 'JetBrains Mono', monospace; }
+.detail-name { font-size: 12px; color: var(--muted); margin-top: 2px; }
+.detail-body { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 0; }
+.detail-section { padding: 16px 20px; border-right: 1px solid var(--border); }
+.detail-section:last-child { border-right: none; }
+.ds-title { font-size: 10px; text-transform: uppercase; letter-spacing: 0.6px; color: var(--muted); margin-bottom: 12px; font-weight: 600; }
+.price-row { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid rgba(30,45,61,0.5); }
+.price-row:last-child { border-bottom: none; }
+.price-label { font-size: 11px; color: var(--muted); }
+.price-val { font-size: 13px; font-weight: 700; font-family: 'JetBrains Mono', monospace; }
+.reasoning-text { font-size: 12px; color: #94a3b8; line-height: 1.7; }
+.tech-pill { display: inline-flex; align-items: center; gap: 4px; background: var(--surface); border: 1px solid var(--border); border-radius: 5px; padding: 4px 10px; margin: 3px; font-size: 11px; font-family: 'JetBrains Mono', monospace; }
+
+/* Confidence bar */
+.conf-bar { height: 3px; background: var(--border); border-radius: 2px; margin-top: 4px; overflow: hidden; }
+.conf-fill { height: 100%; border-radius: 2px; transition: width 0.5s; }
+
+/* Loading */
+.loading { text-align: center; padding: 40px; color: var(--muted); font-size: 13px; }
+.spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--blue); border-radius: 50%; animation: spin 0.8s linear infinite; margin-right: 8px; vertical-align: middle; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* Empty state */
+.empty { text-align: center; padding: 60px 20px; color: var(--muted); }
+.empty-icon { font-size: 40px; margin-bottom: 12px; }
+.empty-title { font-size: 14px; font-weight: 700; color: var(--text); margin-bottom: 6px; }
+
+/* Scrollbar */
+::-webkit-scrollbar { width: 4px; height: 4px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
+
+/* Ticker tape */
+.ticker { background: var(--surface); border-bottom: 1px solid var(--border); padding: 6px 0; overflow: hidden; font-family: 'JetBrains Mono', monospace; font-size: 11px; }
+.ticker-inner { display: flex; gap: 32px; animation: ticker 30s linear infinite; white-space: nowrap; }
+@keyframes ticker { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+.tick-item { display: flex; gap: 6px; align-items: center; }
+.tick-sym { color: var(--text); font-weight: 700; }
+.tick-price { color: var(--muted); }
+</style>
+</head>
+<body>
+
+<!-- Ticker tape -->
+<div class="ticker">
+  <div class="ticker-inner" id="ticker">
+    <span class="tick-item"><span class="tick-sym">NIFTY 50</span><span class="tick-price pos">▲ 22,415.35</span></span>
+    <span class="tick-item"><span class="tick-sym">SENSEX</span><span class="tick-price pos">▲ 73,852.60</span></span>
+    <span class="tick-item"><span class="tick-sym">BANKNIFTY</span><span class="tick-price neg">▼ 47,123.45</span></span>
+    <span class="tick-item"><span class="tick-sym">RELIANCE</span><span class="tick-price pos">▲ 1,284.50</span></span>
+    <span class="tick-item"><span class="tick-sym">TCS</span><span class="tick-price pos">▲ 3,542.10</span></span>
+    <span class="tick-item"><span class="tick-sym">HDFCBANK</span><span class="tick-price neg">▼ 1,623.75</span></span>
+    <span class="tick-item"><span class="tick-sym">INFY</span><span class="tick-price pos">▲ 1,487.30</span></span>
+    <span class="tick-item"><span class="tick-sym">ICICIBANK</span><span class="tick-price pos">▲ 1,052.80</span></span>
+    <span class="tick-item"><span class="tick-sym">ZOMATO</span><span class="tick-price pos">▲ 234.15</span></span>
+    <span class="tick-item"><span class="tick-sym">BAJFINANCE</span><span class="tick-price neg">▼ 6,782.40</span></span>
+    <!-- Duplicate for seamless loop -->
+    <span class="tick-item"><span class="tick-sym">NIFTY 50</span><span class="tick-price pos">▲ 22,415.35</span></span>
+    <span class="tick-item"><span class="tick-sym">SENSEX</span><span class="tick-price pos">▲ 73,852.60</span></span>
+    <span class="tick-item"><span class="tick-sym">BANKNIFTY</span><span class="tick-price neg">▼ 47,123.45</span></span>
+    <span class="tick-item"><span class="tick-sym">RELIANCE</span><span class="tick-price pos">▲ 1,284.50</span></span>
+    <span class="tick-item"><span class="tick-sym">TCS</span><span class="tick-price pos">▲ 3,542.10</span></span>
+    <span class="tick-item"><span class="tick-sym">HDFCBANK</span><span class="tick-price neg">▼ 1,623.75</span></span>
+    <span class="tick-item"><span class="tick-sym">INFY</span><span class="tick-price pos">▲ 1,487.30</span></span>
+    <span class="tick-item"><span class="tick-sym">ICICIBANK</span><span class="tick-price pos">▲ 1,052.80</span></span>
+    <span class="tick-item"><span class="tick-sym">ZOMATO</span><span class="tick-price pos">▲ 234.15</span></span>
+    <span class="tick-item"><span class="tick-sym">BAJFINANCE</span><span class="tick-price neg">▼ 6,782.40</span></span>
+  </div>
+</div>
+
+<!-- Topbar -->
+<div class="topbar">
+  <div class="logo">Phani<span>Market</span></div>
+  <span class="tag tag-phase">Phase 1</span>
+  <span class="tag tag-paper">Paper Trading</span>
+  <div class="market-status">
+    <div class="status-dot dot-open" id="mktDot"></div>
+    <span id="mktStatus">NSE Open</span>
+  </div>
+  <div class="spacer"></div>
+  <span style="font-size:12px;color:var(--muted);margin-right:8px" id="lastScan">Last scan: —</span>
+  <button class="scan-btn" id="scanBtn" onclick="runScan()">▶ Run Scan</button>
+</div>
+
+<div class="layout">
+
+  <!-- Sidebar -->
+  <div class="sidebar">
+
+    <!-- Portfolio -->
+    <div class="sidebar-section">
+      <div class="sidebar-label">Paper Portfolio</div>
+      <div class="portfolio-card">
+        <div class="plabel">Capital</div>
+        <div class="pval" id="capital">₹1,00,000</div>
+        <div class="portfolio-grid">
+          <div class="mini-stat">
+            <div class="ml">P&L</div>
+            <div class="mv pos" id="pnl">+₹0</div>
+          </div>
+          <div class="mini-stat">
+            <div class="ml">Return</div>
+            <div class="mv pos" id="ret">0.0%</div>
+          </div>
+          <div class="mini-stat">
+            <div class="ml">Open</div>
+            <div class="mv" id="openPos">0</div>
+          </div>
+          <div class="mini-stat">
+            <div class="ml">Win Rate</div>
+            <div class="mv" id="winRate">—</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Filters -->
+    <div class="sidebar-section">
+      <div class="sidebar-label">Filter Signals</div>
+      <div class="filter-group">
+        <button class="filter-btn active" onclick="setFilter('all', this)">All Signals <span class="filter-count" id="cnt-all">0</span></button>
+        <button class="filter-btn" onclick="setFilter('BUY', this)">🟢 Buy Signals <span class="filter-count" id="cnt-buy">0</span></button>
+        <button class="filter-btn" onclick="setFilter('SELL', this)">🔴 Sell Signals <span class="filter-count" id="cnt-sell">0</span></button>
+        <button class="filter-btn" onclick="setFilter('swing', this)">Swing Trading <span class="filter-count" id="cnt-swing">0</span></button>
+        <button class="filter-btn" onclick="setFilter('intraday', this)">Intraday <span class="filter-count" id="cnt-intraday">0</span></button>
+        <button class="filter-btn" onclick="setFilter('positional', this)">Positional <span class="filter-count" id="cnt-positional">0</span></button>
+      </div>
+    </div>
+
+    <!-- Watchlist -->
+    <div class="sidebar-section">
+      <div class="sidebar-label">Watchlist</div>
+      <div id="watchlist">
+        <div class="watch-item"><span class="watch-sym">RELIANCE</span><span class="watch-price pos">₹1,284 <span class="watch-chg" style="background:var(--green-dim);color:var(--green)">+1.2%</span></span></div>
+        <div class="watch-item"><span class="watch-sym">TCS</span><span class="watch-price pos">₹3,542 <span class="watch-chg" style="background:var(--green-dim);color:var(--green)">+0.8%</span></span></div>
+        <div class="watch-item"><span class="watch-sym">HDFCBANK</span><span class="watch-price neg">₹1,623 <span class="watch-chg" style="background:var(--red-dim);color:var(--red)">-0.5%</span></span></div>
+        <div class="watch-item"><span class="watch-sym">INFY</span><span class="watch-price pos">₹1,487 <span class="watch-chg" style="background:var(--green-dim);color:var(--green)">+1.1%</span></span></div>
+        <div class="watch-item"><span class="watch-sym">ZOMATO</span><span class="watch-price pos">₹234 <span class="watch-chg" style="background:var(--green-dim);color:var(--green)">+3.2%</span></span></div>
+        <div class="watch-item"><span class="watch-sym">BAJFINANCE</span><span class="watch-price neg">₹6,782 <span class="watch-chg" style="background:var(--red-dim);color:var(--red)">-1.4%</span></span></div>
+      </div>
+    </div>
+
+  </div>
+
+  <!-- Main content -->
+  <div class="main">
+
+    <!-- Stats row -->
+    <div class="stats-row">
+      <div class="stat-card">
+        <div class="sl">Stocks Scanned</div>
+        <div class="sv" id="scanned">—</div>
+        <div class="ss">of 20 watchlist</div>
+      </div>
+      <div class="stat-card">
+        <div class="sl">Buy Signals</div>
+        <div class="sv pos" id="buyCount">—</div>
+        <div class="ss">Strong + Moderate</div>
+      </div>
+      <div class="stat-card">
+        <div class="sl">Sell Signals</div>
+        <div class="sv neg" id="sellCount">—</div>
+        <div class="ss">Strong + Moderate</div>
+      </div>
+      <div class="stat-card">
+        <div class="sl">Avg Confidence</div>
+        <div class="sv" id="avgConf">—</div>
+        <div class="ss">Min threshold 65%</div>
+      </div>
+      <div class="stat-card">
+        <div class="sl">Best R:R Ratio</div>
+        <div class="sv" id="bestRR">—</div>
+        <div class="ss">Risk : Reward</div>
+      </div>
+    </div>
+
+    <!-- Signals Table -->
+    <div class="signals-card">
+      <div class="card-header">
+        <div>
+          <div class="card-title">AI Trading Signals — NSE/BSE</div>
+          <div class="card-sub">Claude-powered analysis with Entry · Stop Loss · Targets · R:R ratio</div>
+        </div>
+      </div>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Stock</th>
+              <th>Signal</th>
+              <th>Mode</th>
+              <th>Current ₹</th>
+              <th>Entry ₹</th>
+              <th>Stop Loss ₹</th>
+              <th>Target 1 ₹</th>
+              <th>Target 2 ₹</th>
+              <th>R:R</th>
+              <th>RSI</th>
+              <th>Trend</th>
+              <th>Confidence</th>
+              <th>Size ₹</th>
+            </tr>
+          </thead>
+          <tbody id="signalBody">
+            <tr><td colspan="13" class="loading"><span class="spinner"></span>Click "Run Scan" to fetch live NSE signals via Claude AI</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Detail panel -->
+    <div class="detail-panel" id="detailPanel">
+      <div class="detail-header">
+        <div>
+          <div class="detail-symbol" id="dSymbol">—</div>
+          <div class="detail-name" id="dName">—</div>
+        </div>
+        <div id="dBadge"></div>
+      </div>
+      <div class="detail-body">
+        <div class="detail-section">
+          <div class="ds-title">Price Levels</div>
+          <div class="price-row"><span class="price-label">Current Price</span><span class="price-val" id="dCurrent">—</span></div>
+          <div class="price-row"><span class="price-label">Entry Price</span><span class="price-val pos" id="dEntry">—</span></div>
+          <div class="price-row"><span class="price-label">Stop Loss</span><span class="price-val neg" id="dSL">—</span></div>
+          <div class="price-row"><span class="price-label">Target 1</span><span class="price-val pos" id="dT1">—</span></div>
+          <div class="price-row"><span class="price-label">Target 2</span><span class="price-val pos" id="dT2">—</span></div>
+          <div class="price-row"><span class="price-label">Target 3</span><span class="price-val pos" id="dT3">—</span></div>
+          <div class="price-row"><span class="price-label">Risk : Reward</span><span class="price-val" id="dRR">—</span></div>
+        </div>
+        <div class="detail-section">
+          <div class="ds-title">Technical Analysis</div>
+          <div id="dTech" class="reasoning-text"></div>
+        </div>
+        <div class="detail-section">
+          <div class="ds-title">Claude's Reasoning</div>
+          <div id="dReasoning" class="reasoning-text"></div>
+          <div style="margin-top:12px">
+            <div class="ds-title">Suggested Position</div>
+            <div style="font-size:20px;font-weight:800;color:var(--blue);font-family:'JetBrains Mono',monospace" id="dSize">—</div>
+            <div style="font-size:11px;color:var(--muted);margin-top:3px">Based on 5% capital allocation</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<script>
+// State
+let allSignals = [];
+let activeFilter = 'all';
+let portfolio = { capital: 100000, pnl: 0, openPos: 0 };
+
+// Market hours check (IST = UTC+5:30)
+function isMarketOpen() {
+  const now = new Date();
+  const ist = new Date(now.getTime() + (5.5 * 60 * 60 * 1000));
+  const day = ist.getUTCDay();
+  const h = ist.getUTCHours(), m = ist.getUTCMinutes();
+  const mins = h * 60 + m;
+  return day >= 1 && day <= 5 && mins >= 555 && mins <= 930; // 9:15 - 15:30
+}
+
+function updateMarketStatus() {
+  const open = isMarketOpen();
+  document.getElementById('mktDot').className = 'status-dot ' + (open ? 'dot-open' : 'dot-closed');
+  document.getElementById('mktStatus').textContent = open ? 'NSE Open' : 'NSE Closed';
+}
+updateMarketStatus();
+setInterval(updateMarketStatus, 60000);
+
+// Signal badge HTML
+function sigBadge(signal, strength) {
+  const key = strength === 'STRONG' ? `strong-${signal}` : signal;
+  const cls = {
+    'STRONG_BUY': 'sig-strong-buy', 'BUY': 'sig-buy',
+    'HOLD': 'sig-hold', 'SELL': 'sig-sell', 'STRONG_SELL': 'sig-strong-sell',
+  }[`${strength === 'STRONG' ? 'STRONG_' : ''}${signal}`] || 'sig-hold';
+  const label = strength === 'STRONG' && signal !== 'HOLD' ? `⚡ ${signal}` : signal;
+  return `<span class="sig-badge ${cls}">${label}</span>`;
+}
+
+function modeBadge(mode) {
+  return `<span class="mode-badge mode-${mode}">${mode}</span>`;
+}
+
+function trendIcon(trend) {
+  return trend === 'uptrend' ? '<span class="pos">↑ UP</span>' :
+         trend === 'downtrend' ? '<span class="neg">↓ DOWN</span>' :
+         '<span style="color:var(--muted)">→ SIDE</span>';
+}
+
+function rsiColor(rsi) {
+  if (!rsi) return '';
+  if (rsi < 35) return 'style="color:var(--green)"';
+  if (rsi > 70) return 'style="color:var(--red)"';
+  return 'style="color:var(--amber)"';
+}
+
+function confBar(conf) {
+  const pct = Math.round(conf * 100);
+  const color = conf >= 0.75 ? 'var(--green)' : conf >= 0.65 ? 'var(--amber)' : 'var(--red)';
+  return `<div style="font-size:11px;font-family:'JetBrains Mono',monospace">${pct}%</div>
+          <div class="conf-bar"><div class="conf-fill" style="width:${pct}%;background:${color}"></div></div>`;
+}
+
+function fmt(n) { return n ? '₹' + n.toLocaleString('en-IN', {maximumFractionDigits:0}) : '—'; }
+
+function renderTable() {
+  const filtered = allSignals.filter(s => {
+    if (activeFilter === 'all') return true;
+    if (activeFilter === 'BUY') return s.signal === 'BUY';
+    if (activeFilter === 'SELL') return s.signal === 'SELL';
+    return s.trading_mode === activeFilter;
+  });
+
+  const body = document.getElementById('signalBody');
+  if (filtered.length === 0) {
+    body.innerHTML = `<tr><td colspan="13"><div class="empty">
+      <div class="empty-icon">📊</div>
+      <div class="empty-title">No signals match this filter</div>
+      <div style="font-size:12px;color:var(--muted)">Try "All Signals" or run a fresh scan</div>
+    </div></td></tr>`;
+    return;
+  }
+
+  body.innerHTML = filtered.map((s, i) => `
+    <tr onclick="showDetail(${i})">
+      <td>
+        <div style="font-weight:700;font-family:'JetBrains Mono',monospace;font-size:13px">${s.symbol}</div>
+        <div style="font-size:10px;color:var(--muted)">${s.company_name || ''} <span class="sector-tag">${s.sector || ''}</span></div>
+      </td>
+      <td>${sigBadge(s.signal, s.strength)}</td>
+      <td>${modeBadge(s.trading_mode)}</td>
+      <td class="mono">${fmt(s.current_price)}</td>
+      <td class="mono ${s.signal === 'BUY' ? 'pos' : 'neg'}">${fmt(s.entry_price)}</td>
+      <td class="mono neg">${fmt(s.stop_loss)}</td>
+      <td class="mono pos">${fmt(s.target_1)}</td>
+      <td class="mono pos">${fmt(s.target_2)}</td>
+      <td class="mono" style="color:${s.risk_reward >= 3 ? 'var(--green)' : s.risk_reward >= 2 ? 'var(--amber)' : 'var(--red)'}">${s.risk_reward ? s.risk_reward.toFixed(1) + ':1' : '—'}</td>
+      <td class="mono" ${rsiColor(s.rsi)}>${s.rsi ? s.rsi.toFixed(0) : '—'}</td>
+      <td>${trendIcon(s.trend)}</td>
+      <td>${confBar(s.confidence)}</td>
+      <td class="mono" style="color:var(--blue)">${fmt(s.position_size_inr)}</td>
+    </tr>
+  `).join('');
+}
+
+function updateStats() {
+  const buys = allSignals.filter(s => s.signal === 'BUY').length;
+  const sells = allSignals.filter(s => s.signal === 'SELL').length;
+  const avgConf = allSignals.length ? allSignals.reduce((a,s) => a + s.confidence, 0) / allSignals.length : 0;
+  const bestRR = allSignals.length ? Math.max(...allSignals.map(s => s.risk_reward || 0)) : 0;
+
+  document.getElementById('scanned').textContent = allSignals.length;
+  document.getElementById('buyCount').textContent = buys;
+  document.getElementById('sellCount').textContent = sells;
+  document.getElementById('avgConf').textContent = avgConf ? Math.round(avgConf * 100) + '%' : '—';
+  document.getElementById('bestRR').textContent = bestRR ? bestRR.toFixed(1) + ':1' : '—';
+
+  // Filter counts
+  document.getElementById('cnt-all').textContent = allSignals.length;
+  document.getElementById('cnt-buy').textContent = buys;
+  document.getElementById('cnt-sell').textContent = sells;
+  document.getElementById('cnt-swing').textContent = allSignals.filter(s=>s.trading_mode==='swing').length;
+  document.getElementById('cnt-intraday').textContent = allSignals.filter(s=>s.trading_mode==='intraday').length;
+  document.getElementById('cnt-positional').textContent = allSignals.filter(s=>s.trading_mode==='positional').length;
+}
+
+function showDetail(idx) {
+  const filtered = allSignals.filter(s => {
+    if (activeFilter === 'all') return true;
+    if (activeFilter === 'BUY') return s.signal === 'BUY';
+    if (activeFilter === 'SELL') return s.signal === 'SELL';
+    return s.trading_mode === activeFilter;
+  });
+  const s = filtered[idx];
+  if (!s) return;
+
+  document.getElementById('dSymbol').textContent = s.symbol;
+  document.getElementById('dName').textContent = s.company_name + ' · ' + s.sector;
+  document.getElementById('dBadge').innerHTML = sigBadge(s.signal, s.strength) + ' ' + modeBadge(s.trading_mode);
+  document.getElementById('dCurrent').textContent = fmt(s.current_price);
+  document.getElementById('dEntry').textContent = fmt(s.entry_price);
+  document.getElementById('dSL').textContent = fmt(s.stop_loss);
+  document.getElementById('dT1').textContent = fmt(s.target_1);
+  document.getElementById('dT2').textContent = fmt(s.target_2);
+  document.getElementById('dT3').textContent = fmt(s.target_3);
+  document.getElementById('dRR').textContent = s.risk_reward ? s.risk_reward.toFixed(1) + ':1' : '—';
+  document.getElementById('dSize').textContent = fmt(s.position_size_inr);
+  document.getElementById('dReasoning').textContent = s.reasoning || 'No reasoning available';
+  document.getElementById('dTech').innerHTML = `
+    <div style="margin-bottom:8px">${s.technical_summary || ''}</div>
+    <div style="margin-top:10px;display:flex;flex-wrap:wrap">
+      <span class="tech-pill"><span style="color:var(--muted)">RSI</span> <span ${rsiColor(s.rsi)}>${s.rsi?.toFixed(0) || '—'}</span></span>
+      <span class="tech-pill"><span style="color:var(--muted)">MACD</span> <span style="color:${s.macd_signal==='bullish'?'var(--green)':'var(--red)'}">${s.macd_signal || '—'}</span></span>
+      <span class="tech-pill"><span style="color:var(--muted)">Trend</span> ${trendIcon(s.trend)}</span>
+      <span class="tech-pill"><span style="color:var(--muted)">Conf</span> <span style="color:var(--blue)">${Math.round(s.confidence*100)}%</span></span>
+    </div>
+    <div style="margin-top:10px;font-size:12px;color:var(--muted)">${s.fundamental_summary || ''}</div>
+  `;
+  document.getElementById('detailPanel').classList.add('show');
+  document.getElementById('detailPanel').scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+}
+
+function setFilter(filter, btn) {
+  activeFilter = filter;
+  document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  renderTable();
+}
+
+async function runScan() {
+  const btn = document.getElementById('scanBtn');
+  btn.disabled = true;
+  btn.textContent = '⟳ Scanning...';
+  document.getElementById('signalBody').innerHTML = '<tr><td colspan="13" class="loading"><span class="spinner"></span>Claude is analysing 20 NSE stocks — this takes 2-3 minutes...</td></tr>';
+  document.getElementById('detailPanel').classList.remove('show');
+
+  // Demo mode — generate realistic signals without Python backend
+  // In production: fetch('/api/scan') calls the Python bot
+  await new Promise(r => setTimeout(r, 2000));
+
+  allSignals = generateDemoSignals();
+  renderTable();
+  updateStats();
+
+  document.getElementById('lastScan').textContent = 'Last scan: ' + new Date().toLocaleTimeString('en-IN');
+  btn.disabled = false;
+  btn.textContent = '▶ Run Scan';
+}
+
+function generateDemoSignals() {
+  return [
+    { symbol:'RELIANCE', company_name:'Reliance Industries', sector:'Energy', signal:'BUY', strength:'STRONG', trading_mode:'swing', current_price:1284.50, entry_price:1282, stop_loss:1242, target_1:1340, target_2:1390, target_3:1450, risk_reward:1.45, position_size_inr:5000, position_size_pct:0.05, confidence:0.82, rsi:42.3, macd_signal:'bullish', trend:'uptrend', pe_ratio:24.5, reasoning:'Reliance is showing strong accumulation near support with RSI recovering from oversold. Jio financial services spin-off catalyst upcoming. Technically forming a flag pattern after 8% correction.', technical_summary:'RSI 42 recovering from oversold. Bullish MACD crossover. Trading near 200 EMA support at ₹1,262.', fundamental_summary:'Strong Q3 results, retail and Jio segments growing 18% YoY. Reasonable PE of 24x.' },
+    { symbol:'TCS', company_name:'Tata Consultancy Services', sector:'IT', signal:'BUY', strength:'MODERATE', trading_mode:'positional', current_price:3542.10, entry_price:3520, stop_loss:3400, target_1:3700, target_2:3900, target_3:4200, risk_reward:1.50, position_size_inr:5000, position_size_pct:0.05, confidence:0.74, rsi:51.2, macd_signal:'bullish', trend:'sideways', pe_ratio:28.1, reasoning:'TCS trading in consolidation zone after AI deal announcements. Breakout above ₹3,600 would confirm uptrend. Strong dollar tailwind for IT exports.', technical_summary:'RSI neutral at 51. MACD about to cross signal line. Key resistance at ₹3,600 — breakout level.', fundamental_summary:'Consistent dividend payer, order book at record high. IT sector recovery accelerating in 2026.' },
+    { symbol:'HDFCBANK', company_name:'HDFC Bank', sector:'Banking', signal:'SELL', strength:'MODERATE', trading_mode:'swing', current_price:1623.75, entry_price:1625, stop_loss:1665, target_1:1565, target_2:1520, target_3:1480, risk_reward:1.63, position_size_inr:3000, position_size_pct:0.03, confidence:0.71, rsi:68.4, macd_signal:'bearish', trend:'uptrend', pe_ratio:19.2, reasoning:'HDFCBANK approaching strong resistance at ₹1,650 with RSI near overbought territory. FII selling observed in recent sessions. Risk-off for banking sector on RBI policy uncertainty.', technical_summary:'RSI 68 approaching overbought. Bearish divergence on MACD. Key resistance at ₹1,650.', fundamental_summary:'NIM pressure from rate uncertainty. Credit growth slowing to 14% from 18%.' },
+    { symbol:'ZOMATO', company_name:'Zomato', sector:'Food-Tech', signal:'BUY', strength:'STRONG', trading_mode:'intraday', current_price:234.15, entry_price:233, stop_loss:228, target_1:242, target_2:250, target_3:265, risk_reward:1.80, position_size_inr:5000, position_size_pct:0.05, confidence:0.78, rsi:38.1, macd_signal:'bullish', trend:'uptrend', pe_ratio:null, reasoning:'Zomato showing oversold bounce setup after 12% correction from highs. Quick commerce Blinkit growing 80% YoY. Institutional buying in dip. Intraday reversal expected from ₹228-233 support zone.', technical_summary:'RSI 38 — deeply oversold. High volume accumulation at support. Bullish hammer candle yesterday.', fundamental_summary:'First profitable quarter sustained. Blinkit GMV growth outpacing competition.' },
+    { symbol:'BAJFINANCE', company_name:'Bajaj Finance', sector:'NBFC', signal:'HOLD', strength:'WEAK', trading_mode:'swing', current_price:6782.40, entry_price:6782, stop_loss:6580, target_1:7000, target_2:7250, target_3:7500, risk_reward:1.08, position_size_inr:0, position_size_pct:0, confidence:0.58, rsi:55.7, macd_signal:'neutral', trend:'sideways', pe_ratio:31.4, reasoning:'Bajaj Finance in consolidation. No clear directional bias. Regulatory uncertainty on NBFC lending norms. Wait for breakout above ₹7,000 or breakdown below ₹6,500 before entry.', technical_summary:'RSI neutral. No MACD signal. Range-bound between ₹6,500-7,000 for 3 weeks.', fundamental_summary:'Strong business but regulatory risks elevated. Valuations at 31x PE are stretched.' },
+    { symbol:'PERSISTENT', company_name:'Persistent Systems', sector:'IT', signal:'BUY', strength:'STRONG', trading_mode:'positional', current_price:5842, entry_price:5800, stop_loss:5560, target_1:6200, target_2:6600, target_3:7200, risk_reward:1.67, position_size_inr:5000, position_size_pct:0.05, confidence:0.81, rsi:44.8, macd_signal:'bullish', trend:'uptrend', pe_ratio:62.1, reasoning:'Persistent is the best performing mid-cap IT stock with 40%+ revenue growth. Correction from highs offers excellent positional entry. BFSI and healthcare verticals accelerating.', technical_summary:'RSI 44 — pullback in uptrend. Strong uptrend intact. Support at ₹5,560. Institutional buying.', fundamental_summary:'40%+ topline growth, expanding margins. Premium valuation justified by growth trajectory.' },
+    { symbol:'MARUTI', company_name:'Maruti Suzuki', sector:'Auto', signal:'BUY', strength:'MODERATE', trading_mode:'swing', current_price:11240, entry_price:11200, stop_loss:10800, target_1:11700, target_2:12200, target_3:12800, risk_reward:1.25, position_size_inr:5000, position_size_pct:0.05, confidence:0.69, rsi:48.5, macd_signal:'bullish', trend:'sideways', pe_ratio:26.3, reasoning:'Maruti consolidating near all-time highs with strong auto sales data. New CNG and EV pipeline attractive. Rural demand recovery driving volume growth.', technical_summary:'RSI neutral at 48. MACD showing bullish crossover. Consolidation breakout setup above ₹11,500.', fundamental_summary:'Monthly sales data strong. Market share holding at 42%. CNG portfolio expanding.' },
+    { symbol:'DIXON', company_name:'Dixon Technologies', sector:'Electronics', signal:'BUY', strength:'STRONG', trading_mode:'positional', current_price:13450, entry_price:13400, stop_loss:12800, target_1:14500, target_2:15800, target_3:17500, risk_reward:1.83, position_size_inr:5000, position_size_pct:0.05, confidence:0.79, rsi:52.1, macd_signal:'bullish', trend:'uptrend', pe_ratio:88.2, reasoning:'Dixon is the biggest beneficiary of China+1 electronics manufacturing shift. Apple vendor qualification incoming. PLI scheme benefits accelerating.', technical_summary:'RSI 52 neutral but strong uptrend. Higher highs and higher lows intact. Institutional accumulation.', fundamental_summary:'Revenue growing 50%+ on PLI incentives. Apple and Samsung contracts scaling.' },
+  ];
+}
+
+// Auto-load demo on start
+window.onload = () => {
+  allSignals = generateDemoSignals();
+  renderTable();
+  updateStats();
+  document.getElementById('lastScan').textContent = 'Demo data loaded';
+};
+</script>
+</body>
+</html>
