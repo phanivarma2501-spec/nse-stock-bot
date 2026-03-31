@@ -19,6 +19,7 @@ from typing import Optional
 from loguru import logger
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings
+from pydantic import ConfigDict
 from pathlib import Path
 
 
@@ -35,9 +36,7 @@ class Settings(BaseSettings):
     MAX_POSITION_PCT: float = 0.05  # 5% per stock
     TRADING_MODES: list = ["swing", "intraday", "positional"]
 
-    class Config:
-        env_file = ".env"
-        extra = "allow"
+    model_config = ConfigDict(env_file=".env", extra="allow")
 
 settings = Settings()
 
@@ -68,7 +67,7 @@ class StockSignal(BaseModel):
     trend: Optional[str] = None
     sector: Optional[str] = None
     pe_ratio: Optional[float] = None
-    timestamp: datetime = datetime.utcnow()
+    timestamp: datetime = datetime.now(tz=None)
 
 
 # ── Stock Universe — Top NSE stocks across sectors ────────────────────────────
