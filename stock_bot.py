@@ -289,6 +289,9 @@ Nifty50 trend: Generally bullish in 2026
 Sector rotation: {sector} sector current conditions
 FII/DII: Net buyers in recent sessions
 
+## Recent News & Sentiment ({news_bias} bias from {news_total} articles)
+{news_context}
+
 Respond ONLY with valid JSON, no markdown:
 {{
   "signal": "BUY" or "SELL" or "HOLD",
@@ -314,6 +317,9 @@ Rules:
 - Target 3: 8-15% above entry (positional)
 - Risk/reward must be at least 2:1
 - Confidence below 0.65 → always HOLD
+- News from last 24h carries 2x weight vs older news
+- Strong bearish news overrides bullish technicals → HOLD or SELL
+- Strong bullish news with bullish technicals → increase confidence
 - Be specific about NSE/BSE context and Indian market factors"""
 
 
@@ -321,8 +327,9 @@ class StockReasoningEngine:
     def __init__(self):
         self.client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
 
-    def analyse(self, stock: dict, quote: dict, tech: dict) -> Optional[StockSignal]:
+    def analyse(self, stock: dict, quote: dict, tech: dict, news_context: str = "", news_stats: dict = None) -> Optional[StockSignal]:
         current = quote["current_price"]
+        news_stats = news_stats or {"bias": "neutral", "total": 0}
         prompt = STOCK_REASONING_PROMPT.format(
             symbol=stock["symbol"],
             name=stock["name"],
@@ -346,6 +353,9 @@ class StockReasoningEngine:
             pivot=f"{tech['pivot']:,.2f}",
             from_52h=tech["from_52w_high"],
             from_52l=tech["from_52w_low"],
+            news_context=news_context or "No recent news. Base analysis on technicals only.",
+            news_bias=news_stats.get("bias", "neutral"),
+            news_total=news_stats.get("total", 0),
         )
         try:
             response = self.client.messages.create(
@@ -468,19 +478,34 @@ class StockBotEngine:
         self.tech = TechnicalAnalyser()
         self.reasoner = StockReasoningEngine()
         self.storage = Storage()
+        self.news = None
         self._running = False
 
     async def startup(self):
+        from news_fetcher import NewsIntelligence
+        self.news = NewsIntelligence()
         await self.storage.init()
         logger.info(f"NSE Stock Bot started | Watching {len(NSE_WATCHLIST)} stocks")
         logger.info(f"Capital: ₹{settings.STARTING_CAPITAL:,.0f} | Max per trade: {settings.MAX_POSITION_PCT:.0%}")
+        logger.info("News: MoneyControl + ET + Business Standard + Google News")
 
     async def scan_stock(self, stock: dict) -> Optional[StockSignal]:
         quote = await self.fetcher.get_quote(stock["symbol"])
         if not quote:
             return None
         tech = self.tech.full_analysis(quote)
-        signal = self.reasoner.analyse(stock, quote, tech)
+        news_context = ""
+        news_stats = {"bias": "neutral", "total": 0}
+        if self.news:
+            try:
+                news_items = await self.news.get_stock_news(stock["symbol"], stock["name"])
+                news_context = self.news.format_for_prompt(news_items)
+                news_stats = self.news.get_news_summary_stats(news_items)
+                if news_items:
+                    logger.debug(f"{stock['symbol']} news: {len(news_items)} articles, bias={news_stats['bias']}")
+            except Exception as e:
+                logger.debug(f"News fetch failed for {stock['symbol']}: {e}")
+        signal = self.reasoner.analyse(stock, quote, tech, news_context, news_stats)
         if signal:
             await self.storage.save_signal(signal)
         return signal
