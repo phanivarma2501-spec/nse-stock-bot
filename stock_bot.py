@@ -470,6 +470,115 @@ class Storage:
             ) as c:
                 return [dict(r) for r in await c.fetchall()]
 
+    async def open_paper_trade(self, signal: "StockSignal"):
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            # Skip if already have open position in this stock
+            async with db.execute(
+                "SELECT COUNT(*) as cnt FROM paper_trades WHERE symbol=? AND status='open'",
+                (signal.symbol,)
+            ) as c:
+                if (await c.fetchone())[0] > 0:
+                    return None
+            tid = str(uuid.uuid4())
+            target = signal.target_1 if signal.signal == "BUY" else signal.target_1
+            await db.execute("""INSERT INTO paper_trades VALUES
+                (?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
+                tid, signal.symbol, signal.signal,
+                signal.entry_price, signal.stop_loss, target,
+                signal.position_size_inr, "open",
+                None, None, None,
+                datetime.now().isoformat(), None,
+            ))
+            await db.commit()
+            logger.info(
+                f"PAPER TRADE OPENED: {signal.signal} {signal.symbol} | "
+                f"Rs {signal.position_size_inr:,.0f} @ Rs {signal.entry_price:,.0f} | "
+                f"SL: Rs {signal.stop_loss:,.0f} | T1: Rs {target:,.0f}"
+            )
+            return tid
+
+    async def check_open_trades(self, fetcher: "StockDataFetcher"):
+        """Check open trades against current prices, close if SL or T1 hit."""
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM paper_trades WHERE status='open'") as c:
+                trades = [dict(r) for r in await c.fetchall()]
+
+        closed = 0
+        for trade in trades:
+            quote = await fetcher.get_quote(trade["symbol"])
+            if not quote:
+                continue
+            price = quote["current_price"]
+            entry = trade["entry_price"]
+            sl = trade["stop_loss"]
+            t1 = trade["target_1"]
+            is_buy = trade["signal"] == "BUY"
+
+            hit_sl = (price <= sl) if is_buy else (price >= sl)
+            hit_t1 = (price >= t1) if is_buy else (price <= t1)
+
+            if hit_sl or hit_t1:
+                exit_price = sl if hit_sl else t1
+                if is_buy:
+                    pnl_pct = (exit_price - entry) / entry
+                else:
+                    pnl_pct = (entry - exit_price) / entry
+                pnl_inr = trade["size_inr"] * pnl_pct
+                result = "T1 HIT" if hit_t1 else "SL HIT"
+
+                async with aiosqlite.connect(settings.DB_PATH) as db:
+                    await db.execute("""UPDATE paper_trades SET
+                        status='closed', exit_price=?, pnl_inr=?, pnl_pct=?, exited_at=?
+                        WHERE id=?""", (
+                        exit_price, round(pnl_inr, 2), round(pnl_pct, 4),
+                        datetime.now().isoformat(), trade["id"],
+                    ))
+                    await db.commit()
+
+                logger.info(
+                    f"PAPER TRADE CLOSED: {result} | {trade['signal']} {trade['symbol']} | "
+                    f"Entry: Rs {entry:,.0f} -> Exit: Rs {exit_price:,.0f} | "
+                    f"P&L: Rs {pnl_inr:+,.0f} ({pnl_pct:+.1%})"
+                )
+                closed += 1
+        return closed
+
+    async def get_open_trades(self) -> list:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM paper_trades WHERE status='open' ORDER BY entered_at DESC") as c:
+                return [dict(r) for r in await c.fetchall()]
+
+    async def get_closed_trades(self) -> list:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT * FROM paper_trades WHERE status='closed' ORDER BY exited_at DESC") as c:
+                return [dict(r) for r in await c.fetchall()]
+
+    async def get_portfolio_summary(self) -> dict:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute("SELECT COUNT(*) as total FROM paper_trades") as c:
+                total = (await c.fetchone())["total"]
+            async with db.execute("SELECT COUNT(*) as open FROM paper_trades WHERE status='open'") as c:
+                open_count = (await c.fetchone())["open"]
+            async with db.execute("SELECT COUNT(*) as closed FROM paper_trades WHERE status='closed'") as c:
+                closed_count = (await c.fetchone())["closed"]
+            async with db.execute("SELECT COUNT(*) as wins FROM paper_trades WHERE status='closed' AND pnl_inr > 0") as c:
+                wins = (await c.fetchone())["wins"]
+            async with db.execute("SELECT COALESCE(SUM(pnl_inr), 0) as pnl FROM paper_trades WHERE status='closed'") as c:
+                total_pnl = (await c.fetchone())["pnl"]
+            async with db.execute("SELECT COALESCE(SUM(size_inr), 0) as deployed FROM paper_trades WHERE status='open'") as c:
+                deployed = (await c.fetchone())["deployed"]
+        win_rate = (wins / closed_count) if closed_count > 0 else 0
+        return {
+            "total_trades": total, "open_trades": open_count, "closed_trades": closed_count,
+            "wins": wins, "win_rate": round(win_rate, 4),
+            "total_pnl": round(total_pnl, 2), "deployed": round(deployed, 2),
+            "capital": settings.STARTING_CAPITAL,
+        }
+
 
 # ── Main Engine ───────────────────────────────────────────────────────────────
 class StockBotEngine:
@@ -514,20 +623,33 @@ class StockBotEngine:
         if not self.is_market_hours():
             logger.info("Market closed - skipping scan")
             return []
+        # Check existing positions for SL/T1 hits
+        closed = await self.storage.check_open_trades(self.fetcher)
+        if closed:
+            logger.info(f"Closed {closed} paper trades (SL/T1 hit)")
+
         logger.info(f"=== NSE Scan started - {len(NSE_WATCHLIST)} stocks ===")
         signals = []
         for stock in NSE_WATCHLIST:
             sig = await self.scan_stock(stock)
             if sig and sig.signal in ("BUY", "SELL"):
                 signals.append(sig)
-            await asyncio.sleep(0.5)  # Rate limiting
+                # Open paper trade
+                await self.storage.open_paper_trade(sig)
+            await asyncio.sleep(0.5)
         buys = [s for s in signals if s.signal == "BUY"]
         sells = [s for s in signals if s.signal == "SELL"]
-        logger.info(f"Scan complete | BUY: {len(buys)} | SELL: {len(sells)}")
+        # Portfolio summary
+        portfolio = await self.storage.get_portfolio_summary()
+        logger.info(
+            f"Scan complete | BUY: {len(buys)} | SELL: {len(sells)} | "
+            f"Open: {portfolio['open_trades']} | Closed: {portfolio['closed_trades']} | "
+            f"Win rate: {portfolio['win_rate']:.0%} | P&L: Rs {portfolio['total_pnl']:+,.0f}"
+        )
         for s in sorted(signals, key=lambda x: x.confidence, reverse=True):
             logger.info(
-                f"  {s.signal} {s.symbol} | ₹{s.entry_price:,.0f} → "
-                f"SL ₹{s.stop_loss:,.0f} | T1 ₹{s.target_1:,.0f} | "
+                f"  {s.signal} {s.symbol} | Rs {s.entry_price:,.0f} -> "
+                f"SL Rs {s.stop_loss:,.0f} | T1 Rs {s.target_1:,.0f} | "
                 f"Conf: {s.confidence:.0%} | {s.trading_mode}"
             )
         return signals

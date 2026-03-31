@@ -37,6 +37,18 @@ async def api_actionable():
             return [dict(r) for r in await c.fetchall()]
 
 
+@app.get("/api/trades/open")
+async def api_open_trades():
+    return await storage.get_open_trades()
+
+@app.get("/api/trades/closed")
+async def api_closed_trades():
+    return await storage.get_closed_trades()
+
+@app.get("/api/portfolio")
+async def api_portfolio():
+    return await storage.get_portfolio_summary()
+
 @app.get("/api/stats")
 async def api_stats():
     async with aiosqlite.connect(settings.DB_PATH) as db:
