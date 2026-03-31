@@ -511,7 +511,10 @@ class StockBotEngine:
         return signal
 
     async def run_scan(self):
-        logger.info(f"=== NSE Scan started — {len(NSE_WATCHLIST)} stocks ===")
+        if not self.is_market_hours():
+            logger.info("Market closed - skipping scan")
+            return []
+        logger.info(f"=== NSE Scan started - {len(NSE_WATCHLIST)} stocks ===")
         signals = []
         for stock in NSE_WATCHLIST:
             sig = await self.scan_stock(stock)
