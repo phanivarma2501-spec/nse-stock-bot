@@ -205,12 +205,27 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
 <div class="content">
   <div class="tabs">
-    <button class="tab active" onclick="showTab('signals')">All Signals</button>
+    <button class="tab active" onclick="showTab('trades')">Paper Trades</button>
+    <button class="tab" onclick="showTab('signals')">All Signals</button>
     <button class="tab" onclick="showTab('buysell')">BUY / SELL Only</button>
     <button class="tab" onclick="showTab('sectors')">Sector View</button>
   </div>
 
-  <div id="tab-signals" class="tbl-wrap">
+  <div id="tab-trades" class="tbl-wrap">
+    <div id="portfolioBar" style="padding:12px 16px;background:#161b22;border-bottom:1px solid #21262d;display:flex;gap:24px;font-size:13px;"></div>
+    <h3 style="padding:12px 16px 4px;color:#c9d1d9;font-size:14px;">Open Positions</h3>
+    <table>
+      <thead><tr><th>#</th><th>Side</th><th>Stock</th><th>Entry</th><th>SL</th><th>T1</th><th>Size</th><th>Opened</th></tr></thead>
+      <tbody id="openBody"></tbody>
+    </table>
+    <h3 style="padding:12px 16px 4px;color:#c9d1d9;font-size:14px;">Closed Trades</h3>
+    <table>
+      <thead><tr><th>#</th><th>Side</th><th>Stock</th><th>Entry</th><th>Exit</th><th>Size</th><th>P&L</th><th>Result</th><th>Closed</th></tr></thead>
+      <tbody id="closedBody"></tbody>
+    </table>
+  </div>
+
+  <div id="tab-signals" class="tbl-wrap" style="display:none">
     <table>
       <thead><tr>
         <th>Stock</th><th>Signal</th><th>Strength</th><th>Mode</th>
@@ -340,8 +355,55 @@ function showTab(name) {
   event.target.classList.add('active');
 }
 
+async function loadPortfolio() {
+  const d = await(await fetch('/api/portfolio')).json();
+  const bar = document.getElementById('portfolioBar');
+  bar.innerHTML = `
+    <span>Total: <b>${d.total_trades}</b></span>
+    <span>Open: <b style="color:#d29922">${d.open_trades}</b></span>
+    <span>Closed: <b>${d.closed_trades}</b></span>
+    <span>Wins: <b style="color:#3fb950">${d.wins}</b></span>
+    <span>Win Rate: <b style="color:${d.win_rate>=0.5?'#3fb950':'#f85149'}">${(d.win_rate*100).toFixed(0)}%</b></span>
+    <span>P&L: <b style="color:${d.total_pnl>=0?'#3fb950':'#f85149'}">${INR(d.total_pnl)}</b></span>
+    <span>Deployed: <b style="color:#58a6ff">${INR(d.deployed)}</b> / ${INR(d.capital)}</span>
+  `;
+}
+
+async function loadOpenTrades() {
+  const trades = await(await fetch('/api/trades/open')).json();
+  const tbody = document.getElementById('openBody');
+  if (!trades.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#8b949e;padding:20px;">No open positions</td></tr>'; return; }
+  tbody.innerHTML = trades.map((t,i) => `<tr>
+    <td>${i+1}</td>
+    <td><span class="sig ${sigClass(t.signal)}">${t.signal}</span></td>
+    <td><b>${t.symbol}</b></td>
+    <td>${INR(t.entry_price)}</td>
+    <td style="color:#f85149">${INR(t.stop_loss)}</td>
+    <td style="color:#3fb950">${INR(t.target_1)}</td>
+    <td>${INR(t.size_inr)}</td>
+    <td style="font-size:11px;color:#8b949e">${fmtDate(t.entered_at)}</td>
+  </tr>`).join('');
+}
+
+async function loadClosedTrades() {
+  const trades = await(await fetch('/api/trades/closed')).json();
+  const tbody = document.getElementById('closedBody');
+  if (!trades.length) { tbody.innerHTML = '<tr><td colspan="9" style="text-align:center;color:#8b949e;padding:20px;">No closed trades yet - waiting for SL/T1 hits</td></tr>'; return; }
+  tbody.innerHTML = trades.map((t,i) => `<tr>
+    <td>${i+1}</td>
+    <td><span class="sig ${sigClass(t.signal)}">${t.signal}</span></td>
+    <td><b>${t.symbol}</b></td>
+    <td>${INR(t.entry_price)}</td>
+    <td>${INR(t.exit_price)}</td>
+    <td>${INR(t.size_inr)}</td>
+    <td style="color:${(t.pnl_inr||0)>=0?'#3fb950':'#f85149'}">${t.pnl_inr!=null?(t.pnl_inr>=0?'+':'')+INR(t.pnl_inr):'-'}</td>
+    <td>${t.pnl_inr!=null?(t.pnl_inr>0?'WIN':'LOSS'):'-'}</td>
+    <td style="font-size:11px;color:#8b949e">${fmtDate(t.exited_at)}</td>
+  </tr>`).join('');
+}
+
 async function refresh() {
-  await Promise.all([loadStats(), loadSignals(), loadActionable(), loadSectors()]);
+  await Promise.all([loadStats(), loadSignals(), loadActionable(), loadSectors(), loadPortfolio(), loadOpenTrades(), loadClosedTrades()]);
 }
 refresh();
 setInterval(refresh, 30000);
