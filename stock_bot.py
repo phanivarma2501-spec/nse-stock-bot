@@ -14,7 +14,7 @@ import asyncio
 import aiosqlite
 import httpx
 import uuid
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from loguru import logger
 from pydantic import BaseModel
@@ -529,13 +529,26 @@ class StockBotEngine:
             )
         return signals
 
+    @staticmethod
+    def is_market_hours() -> bool:
+        """Check if NSE is open (9:15 AM - 3:00 PM IST, Mon-Fri)."""
+        ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+        h, m = ist.hour, ist.minute
+        day = ist.weekday()  # 0=Mon, 4=Fri
+        return day < 5 and (h > 9 or (h == 9 and m >= 15)) and h < 15
+
     async def run(self):
         self._running = True
         await self.startup()
         while self._running:
-            await self.run_scan()
-            logger.info(f"Next scan in {settings.SCAN_INTERVAL_MINUTES} minutes...")
-            await asyncio.sleep(settings.SCAN_INTERVAL_MINUTES * 60)
+            if self.is_market_hours():
+                await self.run_scan()
+                logger.info(f"Next scan in {settings.SCAN_INTERVAL_MINUTES} minutes...")
+                await asyncio.sleep(settings.SCAN_INTERVAL_MINUTES * 60)
+            else:
+                ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
+                logger.info(f"Market closed (IST: {ist.strftime('%H:%M %A')}). Sleeping 15 min...")
+                await asyncio.sleep(900)
 
     async def run_once(self):
         await self.startup()
