@@ -100,50 +100,44 @@ NSE_WATCHLIST = [
 
 # ── Yahoo Finance Data Fetcher ────────────────────────────────────────────────
 class StockDataFetcher:
-    """Fetches stock data from Yahoo Finance (free, no API key needed)."""
+    """Fetches stock data via yfinance (handles Yahoo auth automatically)."""
 
     def __init__(self):
-        self.client = httpx.AsyncClient(timeout=15)
-        self.base = "https://query1.finance.yahoo.com/v8/finance/chart"
+        import yfinance as yf
+        self.yf = yf
 
     async def get_quote(self, symbol: str) -> Optional[dict]:
-        """Get current price and basic data."""
-        yf_symbol = f"{symbol}.NS"  # NSE suffix
+        """Get current price and 3-month history."""
+        yf_symbol = f"{symbol}.NS"
         try:
-            url = f"{self.base}/{yf_symbol}"
-            params = {"interval": "1d", "range": "3mo"}
-            r = await self.client.get(url, params=params)
-            data = r.json()
-            result = data["chart"]["result"][0]
-            meta = result["meta"]
-            closes = result["indicators"]["quote"][0]["closes"] if "closes" in result["indicators"]["quote"][0] else result["indicators"]["quote"][0].get("close", [])
-            highs = result["indicators"]["quote"][0].get("high", [])
-            lows = result["indicators"]["quote"][0].get("low", [])
-            volumes = result["indicators"]["quote"][0].get("volume", [])
+            ticker = self.yf.Ticker(yf_symbol)
+            hist = ticker.history(period="3mo")
+            if hist.empty:
+                return None
 
-            # Clean None values
-            closes = [c for c in closes if c is not None]
-            highs = [h for h in highs if h is not None]
-            lows = [l for l in lows if l is not None]
-            volumes = [v for v in volumes if v is not None]
+            closes = hist["Close"].dropna().tolist()
+            highs = hist["High"].dropna().tolist()
+            lows = hist["Low"].dropna().tolist()
+            volumes = hist["Volume"].dropna().tolist()
 
             if not closes:
                 return None
 
-            current_price = meta.get("regularMarketPrice", closes[-1])
+            info = ticker.info or {}
+            current_price = info.get("currentPrice") or info.get("regularMarketPrice") or closes[-1]
 
             return {
                 "symbol": symbol,
                 "current_price": current_price,
-                "prev_close": meta.get("previousClose", closes[-2] if len(closes) > 1 else current_price),
-                "day_high": meta.get("regularMarketDayHigh", highs[-1] if highs else current_price),
-                "day_low": meta.get("regularMarketDayLow", lows[-1] if lows else current_price),
-                "volume": meta.get("regularMarketVolume", volumes[-1] if volumes else 0),
-                "52w_high": meta.get("fiftyTwoWeekHigh", max(highs) if highs else current_price),
-                "52w_low": meta.get("fiftyTwoWeekLow", min(lows) if lows else current_price),
-                "market_cap": meta.get("marketCap", 0),
-                "pe_ratio": meta.get("trailingPE"),
-                "closes": closes[-60:],  # Last 60 days
+                "prev_close": info.get("previousClose", closes[-2] if len(closes) > 1 else current_price),
+                "day_high": info.get("dayHigh", highs[-1] if highs else current_price),
+                "day_low": info.get("dayLow", lows[-1] if lows else current_price),
+                "volume": info.get("volume", volumes[-1] if volumes else 0),
+                "52w_high": info.get("fiftyTwoWeekHigh", max(highs) if highs else current_price),
+                "52w_low": info.get("fiftyTwoWeekLow", min(lows) if lows else current_price),
+                "market_cap": info.get("marketCap", 0),
+                "pe_ratio": info.get("trailingPE"),
+                "closes": closes[-60:],
                 "highs": highs[-60:],
                 "lows": lows[-60:],
                 "volumes": volumes[-60:],
@@ -153,7 +147,7 @@ class StockDataFetcher:
             return None
 
     async def close(self):
-        await self.client.aclose()
+        pass
 
 
 # ── Technical Analysis ────────────────────────────────────────────────────────
