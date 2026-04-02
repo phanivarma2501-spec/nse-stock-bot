@@ -171,6 +171,29 @@ def _extract_value(cell):
     return v
 
 
+class _AiosqliteWrapper:
+    """Wraps aiosqlite connection so row_factory=True works (maps to aiosqlite.Row)."""
+    def __init__(self, db):
+        self._db = db
+    @property
+    def row_factory(self):
+        return self._db.row_factory
+    @row_factory.setter
+    def row_factory(self, value):
+        if value is True:
+            self._db.row_factory = aiosqlite.Row
+        else:
+            self._db.row_factory = value
+    def execute(self, sql, params=None):
+        if params:
+            return self._db.execute(sql, params)
+        return self._db.execute(sql)
+    async def commit(self):
+        await self._db.commit()
+    async def close(self):
+        pass  # managed by aiosqlite context manager
+
+
 @asynccontextmanager
 async def connect(local_path=None):
     """
@@ -187,4 +210,4 @@ async def connect(local_path=None):
         async with aiosqlite.connect(local_path) as db:
             await db.execute("PRAGMA journal_mode=WAL")
             await db.execute("PRAGMA busy_timeout=5000")
-            yield db
+            yield _AiosqliteWrapper(db)
