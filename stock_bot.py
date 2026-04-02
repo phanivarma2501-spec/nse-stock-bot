@@ -7,6 +7,7 @@ Signals: Buy/Sell + Entry + Stop Loss + Target
 Analysis: Technical (RSI, MACD, EMA) + Fundamental (PE, earnings)
 """
 
+import os
 import anthropic
 import json
 import math
@@ -30,7 +31,7 @@ class Settings(BaseSettings):
     PAPER_TRADING: bool = True
     LIVE_TRADING_ENABLED: bool = False
     STARTING_CAPITAL: float = 100000.0  # ₹1 lakh default
-    DB_PATH: str = "data/stock_bot.db"
+    DB_PATH: str = "/app/data/stock_bot.db" if os.environ.get("RAILWAY_ENVIRONMENT") else "data/stock_bot.db"
     SCAN_INTERVAL_MINUTES: int = 60
     MIN_CONFIDENCE: float = 0.65
     MAX_POSITION_PCT: float = 0.05  # 5% per stock
