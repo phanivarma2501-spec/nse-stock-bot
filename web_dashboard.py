@@ -6,6 +6,7 @@ Run with: python web_dashboard.py
 import asyncio
 import aiosqlite
 from fastapi import FastAPI
+from turso_client import connect as turso_connect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 from stock_bot import Storage, settings
@@ -56,8 +57,8 @@ async def api_signals():
 
 @app.get("/api/signals/actionable")
 async def api_actionable():
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with turso_connect(settings.DB_PATH) as db:
+        db.row_factory = True
         async with db.execute(
             "SELECT * FROM signals WHERE signal IN ('BUY','SELL') ORDER BY timestamp DESC LIMIT 30"
         ) as c:
@@ -78,8 +79,8 @@ async def api_portfolio():
 
 @app.get("/api/stats")
 async def api_stats():
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with turso_connect(settings.DB_PATH) as db:
+        db.row_factory = True
         async with db.execute("SELECT COUNT(*) as total FROM signals") as c:
             total = (await c.fetchone())["total"]
         async with db.execute("SELECT COUNT(*) as buys FROM signals WHERE signal='BUY'") as c:
@@ -102,8 +103,8 @@ async def api_stats():
 
 @app.get("/api/sectors")
 async def api_sectors():
-    async with aiosqlite.connect(settings.DB_PATH) as db:
-        db.row_factory = aiosqlite.Row
+    async with turso_connect(settings.DB_PATH) as db:
+        db.row_factory = True
         async with db.execute("""
             SELECT sector, signal, COUNT(*) as cnt, AVG(confidence) as avg_conf
             FROM signals WHERE signal IN ('BUY','SELL')

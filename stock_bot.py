@@ -534,8 +534,12 @@ class Storage:
     def __init__(self):
         Path(settings.DB_PATH).parent.mkdir(parents=True, exist_ok=True)
 
+    def _connect(self):
+        from turso_client import connect
+        return connect(settings.DB_PATH)
+
     async def init(self):
-        async with aiosqlite.connect(settings.DB_PATH) as db:
+        async with self._connect() as db:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS signals (
                     id TEXT PRIMARY KEY, symbol TEXT, company_name TEXT,
@@ -560,7 +564,7 @@ class Storage:
             await db.commit()
 
     async def save_signal(self, s: StockSignal):
-        async with aiosqlite.connect(settings.DB_PATH) as db:
+        async with self._connect() as db:
             await db.execute("""INSERT OR REPLACE INTO signals VALUES
                 (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""", (
                 str(uuid.uuid4()), s.symbol, s.company_name, s.signal,
@@ -574,15 +578,15 @@ class Storage:
             await db.commit()
 
     async def get_recent_signals(self, limit: int = 20) -> list:
-        async with aiosqlite.connect(settings.DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect() as db:
+            db.row_factory = True
             async with db.execute(
                 "SELECT * FROM signals ORDER BY timestamp DESC LIMIT ?", (limit,)
             ) as c:
                 return [dict(r) for r in await c.fetchall()]
 
     async def open_paper_trade(self, signal: "StockSignal"):
-        async with aiosqlite.connect(settings.DB_PATH) as db:
+        async with self._connect() as db:
             # Skip if already have open position in this stock
             async with db.execute(
                 "SELECT COUNT(*) as cnt FROM paper_trades WHERE symbol=? AND status='open'",
@@ -610,8 +614,8 @@ class Storage:
 
     async def check_open_trades(self, fetcher: "StockDataFetcher"):
         """Check open trades against current prices, close if SL or T1 hit."""
-        async with aiosqlite.connect(settings.DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect() as db:
+            db.row_factory = True
             async with db.execute("SELECT * FROM paper_trades WHERE status='open'") as c:
                 trades = [dict(r) for r in await c.fetchall()]
 
@@ -638,7 +642,7 @@ class Storage:
                 pnl_inr = trade["size_inr"] * pnl_pct
                 result = "T1 HIT" if hit_t1 else "SL HIT"
 
-                async with aiosqlite.connect(settings.DB_PATH) as db:
+                async with self._connect() as db:
                     await db.execute("""UPDATE paper_trades SET
                         status='closed', exit_price=?, pnl_inr=?, pnl_pct=?, exited_at=?
                         WHERE id=?""", (
@@ -656,20 +660,20 @@ class Storage:
         return closed
 
     async def get_open_trades(self) -> list:
-        async with aiosqlite.connect(settings.DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect() as db:
+            db.row_factory = True
             async with db.execute("SELECT * FROM paper_trades WHERE status='open' ORDER BY entered_at DESC") as c:
                 return [dict(r) for r in await c.fetchall()]
 
     async def get_closed_trades(self) -> list:
-        async with aiosqlite.connect(settings.DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect() as db:
+            db.row_factory = True
             async with db.execute("SELECT * FROM paper_trades WHERE status='closed' ORDER BY exited_at DESC") as c:
                 return [dict(r) for r in await c.fetchall()]
 
     async def get_portfolio_summary(self) -> dict:
-        async with aiosqlite.connect(settings.DB_PATH) as db:
-            db.row_factory = aiosqlite.Row
+        async with self._connect() as db:
+            db.row_factory = True
             async with db.execute("SELECT COUNT(*) as total FROM paper_trades") as c:
                 total = (await c.fetchone())["total"]
             async with db.execute("SELECT COUNT(*) as open FROM paper_trades WHERE status='open'") as c:
