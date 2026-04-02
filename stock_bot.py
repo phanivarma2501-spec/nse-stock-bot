@@ -8,7 +8,6 @@ Analysis: Technical (RSI, MACD, EMA) + Fundamental (PE, earnings)
 """
 
 import os
-import anthropic
 import json
 import math
 import asyncio
@@ -26,7 +25,7 @@ from pathlib import Path
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 class Settings(BaseSettings):
-    ANTHROPIC_API_KEY: str = ""
+    GEMINI_API_KEY: str = ""
     PHASE: int = 1
     PAPER_TRADING: bool = True
     LIVE_TRADING_ENABLED: bool = False
@@ -436,7 +435,8 @@ Rules:
 
 class StockReasoningEngine:
     def __init__(self):
-        self.client = anthropic.Anthropic(api_key=settings.ANTHROPIC_API_KEY)
+        from google import genai
+        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
 
     def analyse(self, stock: dict, quote: dict, tech: dict, news_context: str = "", news_stats: dict = None) -> Optional[StockSignal]:
         current = quote["current_price"]
@@ -469,17 +469,15 @@ class StockReasoningEngine:
             news_total=news_stats.get("total", 0),
         )
         try:
-            response = self.client.messages.create(
-                model="claude-haiku-4-5-20251001",
-                max_tokens=1000,
-                messages=[{"role": "user", "content": prompt}],
+            response = self.client.models.generate_content(
+                model="gemini-2.5-flash",
+                contents=prompt,
+                config={
+                    "response_mime_type": "application/json",
+                    "temperature": 0.3,
+                },
             )
-            raw = response.content[0].text.strip()
-            if raw.startswith("```"):
-                raw = raw.split("```")[1]
-                if raw.startswith("json"):
-                    raw = raw[4:]
-            raw = raw.strip().rstrip("```").strip()
+            raw = response.text.strip()
             data = json.loads(raw)
             confidence = float(data.get("confidence", 0.5))
             if confidence < settings.MIN_CONFIDENCE:
