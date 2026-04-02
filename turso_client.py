@@ -9,13 +9,15 @@ import aiosqlite
 from contextlib import asynccontextmanager
 from loguru import logger
 
-TURSO_URL = os.environ.get("TURSO_DATABASE_URL", "")
-TURSO_TOKEN = os.environ.get("TURSO_AUTH_TOKEN", "")
+def _get_turso_config():
+    """Read Turso config from env vars at call time (not import time)."""
+    url = os.environ.get("TURSO_DATABASE_URL", "")
+    token = os.environ.get("TURSO_AUTH_TOKEN", "")
+    return url, token
 
 
-def _turso_http_url():
+def _turso_http_url(url):
     """Convert libsql:// URL to https:// for HTTP API."""
-    url = TURSO_URL
     if url.startswith("libsql://"):
         url = url.replace("libsql://", "https://")
     return url.rstrip("/")
@@ -24,12 +26,12 @@ def _turso_http_url():
 class TursoConnection:
     """Async connection to Turso via HTTP pipeline API."""
 
-    def __init__(self):
-        self._base = _turso_http_url()
+    def __init__(self, url, token):
+        self._base = _turso_http_url(url)
         self._client = httpx.AsyncClient(
             timeout=30,
             headers={
-                "Authorization": f"Bearer {TURSO_TOKEN}",
+                "Authorization": f"Bearer {token}",
                 "Content-Type": "application/json",
             },
         )
@@ -200,8 +202,9 @@ async def connect(local_path=None):
     Smart connection: uses Turso when configured, aiosqlite otherwise.
     Provides the same async context manager interface.
     """
-    if TURSO_URL and TURSO_TOKEN:
-        conn = TursoConnection()
+    turso_url, turso_token = _get_turso_config()
+    if turso_url and turso_token:
+        conn = TursoConnection(turso_url, turso_token)
         try:
             yield conn
         finally:
