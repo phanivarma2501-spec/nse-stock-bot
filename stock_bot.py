@@ -93,7 +93,7 @@ NSE_WATCHLIST = [
     {"symbol": "DIXON", "name": "Dixon Technologies", "sector": "Electronics", "market_cap": "mid"},
     {"symbol": "IRCTC", "name": "IRCTC", "sector": "Travel", "market_cap": "mid"},
     {"symbol": "POLYCAB", "name": "Polycab India", "sector": "Cables", "market_cap": "mid"},
-    {"symbol": "ZOMATO", "name": "Zomato", "sector": "Food-Tech", "market_cap": "mid"},
+    {"symbol": "TRENT", "name": "Trent Limited", "sector": "Retail", "market_cap": "mid"},
 ]
 
 
