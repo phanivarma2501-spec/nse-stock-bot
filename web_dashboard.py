@@ -22,6 +22,33 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="NSE Stock Bot Dashboard", lifespan=lifespan)
 
 
+@app.get("/api/live-prices")
+async def api_live_prices():
+    """Fetch real-time NSE prices for all watchlist stocks."""
+    from stock_bot import StockDataFetcher, NSE_WATCHLIST
+    fetcher = StockDataFetcher()
+    prices = []
+    for stock in NSE_WATCHLIST:
+        try:
+            data = await fetcher._fetch_nse_live(stock["symbol"])
+            if data:
+                prices.append({
+                    "symbol": stock["symbol"],
+                    "name": stock["name"],
+                    "sector": stock["sector"],
+                    "price": data["current_price"],
+                    "change": data.get("change", 0),
+                    "change_pct": data.get("change_pct", 0),
+                    "day_high": data.get("day_high", 0),
+                    "day_low": data.get("day_low", 0),
+                    "source": "NSE_LIVE",
+                })
+        except Exception:
+            pass
+    await fetcher.close()
+    return prices
+
+
 @app.get("/api/signals")
 async def api_signals():
     return await storage.get_recent_signals(50)
@@ -111,6 +138,42 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   .badge-nse { background: #1f6feb; color: #fff; }
   .refresh-info { color: #8b949e; font-size: 12px; }
 
+  /* Live Ticker Banner */
+  .ticker-wrap {
+    background: #0d1117; border-bottom: 1px solid #21262d;
+    overflow: hidden; height: 38px; position: relative;
+  }
+  .ticker-strip {
+    display: flex; align-items: center; height: 100%;
+    animation: scroll-left 45s linear infinite;
+    white-space: nowrap; width: max-content;
+  }
+  .ticker-strip:hover { animation-play-state: paused; }
+  @keyframes scroll-left {
+    0% { transform: translateX(0); }
+    100% { transform: translateX(-50%); }
+  }
+  .ticker-item {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 0 20px; font-size: 13px; font-weight: 500;
+    border-right: 1px solid #21262d;
+  }
+  .ticker-item .sym { color: #58a6ff; font-weight: 700; }
+  .ticker-item .price { color: #e1e5ee; }
+  .ticker-item .chg-up { color: #3fb950; }
+  .ticker-item .chg-down { color: #f85149; }
+  .ticker-label {
+    position: absolute; left: 0; top: 0; z-index: 2;
+    background: linear-gradient(90deg, #f0883e 0%, #da6d25 100%);
+    color: #fff; font-size: 11px; font-weight: 700; letter-spacing: 0.5px;
+    padding: 0 14px; height: 100%; display: flex; align-items: center;
+    text-transform: uppercase;
+  }
+  .ticker-loading {
+    display: flex; align-items: center; justify-content: center;
+    height: 100%; color: #8b949e; font-size: 12px;
+  }
+
   .stats-row {
     display: grid; grid-template-columns: repeat(auto-fit, minmax(155px, 1fr));
     gap: 14px; padding: 18px 28px;
@@ -191,6 +254,12 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   <div style="display:flex;align-items:center;gap:16px;">
     <span class="refresh-info" id="timer">Auto-refresh: 30s</span>
   </div>
+</div>
+
+<div class="ticker-wrap" id="tickerWrap">
+  <div class="ticker-label">LIVE</div>
+  <div class="ticker-loading" id="tickerLoading">Loading live prices...</div>
+  <div class="ticker-strip" id="tickerStrip" style="display:none;padding-left:50px;"></div>
 </div>
 
 <div class="stats-row" id="stats">
@@ -402,11 +471,38 @@ async function loadClosedTrades() {
   </tr>`).join('');
 }
 
+async function loadTicker() {
+  try {
+    const prices = await (await fetch('/api/live-prices')).json();
+    if (!prices.length) return;
+    const strip = document.getElementById('tickerStrip');
+    const loading = document.getElementById('tickerLoading');
+    // Duplicate items for seamless loop
+    const html = prices.map(p => {
+      const up = p.change_pct >= 0;
+      const arrow = up ? '&#9650;' : '&#9660;';
+      const cls = up ? 'chg-up' : 'chg-down';
+      return `<div class="ticker-item">
+        <span class="sym">${p.symbol}</span>
+        <span class="price">${INR(p.price)}</span>
+        <span class="${cls}">${arrow} ${Math.abs(p.change_pct).toFixed(2)}%</span>
+      </div>`;
+    }).join('');
+    strip.innerHTML = html + html;  // duplicate for infinite scroll
+    loading.style.display = 'none';
+    strip.style.display = 'flex';
+  } catch(e) {
+    console.log('Ticker error:', e);
+  }
+}
+
 async function refresh() {
   await Promise.all([loadStats(), loadSignals(), loadActionable(), loadSectors(), loadPortfolio(), loadOpenTrades(), loadClosedTrades()]);
 }
 refresh();
+loadTicker();
 setInterval(refresh, 30000);
+setInterval(loadTicker, 60000);  // refresh prices every 60s
 
 let cd = 30;
 setInterval(() => { cd--; if (cd <= 0) cd = 30; document.getElementById('timer').textContent = 'Auto-refresh: ' + cd + 's'; }, 1000);
