@@ -97,16 +97,80 @@ NSE_WATCHLIST = [
 ]
 
 
-# ── Yahoo Finance Data Fetcher ────────────────────────────────────────────────
+# ── NSE India Live + yfinance Historical Data Fetcher ─────────────────────────
 class StockDataFetcher:
-    """Fetches stock data via yfinance (handles Yahoo auth automatically)."""
+    """Fetches live prices from NSE India API, historical data from yfinance."""
+
+    NSE_QUOTE_URL = "https://www.nseindia.com/api/quote-equity?symbol={symbol}"
+    NSE_BASE_URL = "https://www.nseindia.com"
 
     def __init__(self):
         import yfinance as yf
         self.yf = yf
+        self._nse_cookies = None
+        self._nse_client = httpx.AsyncClient(
+            timeout=15,
+            headers={
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "Accept": "application/json, text/plain, */*",
+                "Accept-Language": "en-US,en;q=0.9",
+                "Referer": "https://www.nseindia.com/",
+            },
+            follow_redirects=True,
+        )
 
-    async def get_quote(self, symbol: str) -> Optional[dict]:
-        """Get current price and 3-month history."""
+    async def _fetch_nse_live(self, symbol: str) -> Optional[dict]:
+        """Get real-time quote from NSE India API."""
+        try:
+            referer = f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}"
+            url = self.NSE_QUOTE_URL.format(symbol=symbol)
+            resp = await self._nse_client.get(url, headers={"Referer": referer})
+
+            if resp.status_code != 200:
+                logger.debug(f"NSE API {resp.status_code} for {symbol}")
+                return None
+
+            data = resp.json()
+            price_info = data.get("priceInfo", {})
+            metadata = data.get("metadata", {})
+
+            current_price = price_info.get("lastPrice")
+            if not current_price:
+                return None
+
+            # Fetch volume from trade_info endpoint
+            volume = 0
+            try:
+                trade_resp = await self._nse_client.get(
+                    f"{url}&section=trade_info", headers={"Referer": referer}
+                )
+                if trade_resp.status_code == 200:
+                    trade_data = trade_resp.json()
+                    volume = int(trade_data.get("securityWiseDP", {}).get("quantityTraded", 0) or 0)
+            except Exception:
+                pass
+
+            return {
+                "nse_live": True,
+                "current_price": float(current_price),
+                "prev_close": float(price_info.get("previousClose", 0)),
+                "open": float(price_info.get("open", 0)),
+                "day_high": float(price_info.get("intraDayHighLow", {}).get("max", 0)),
+                "day_low": float(price_info.get("intraDayHighLow", {}).get("min", 0)),
+                "volume": volume,
+                "52w_high": float(price_info.get("weekHighLow", {}).get("max", 0)),
+                "52w_low": float(price_info.get("weekHighLow", {}).get("min", 0)),
+                "pe_ratio": float(metadata.get("pdSymbolPe", 0) or 0) or None,
+                "change": float(price_info.get("change", 0)),
+                "change_pct": float(price_info.get("pChange", 0)),
+                "market_cap": float(metadata.get("marketCap", 0) or 0),
+            }
+        except Exception as e:
+            logger.debug(f"NSE live fetch failed for {symbol}: {e}")
+            return None
+
+    def _fetch_yf_history(self, symbol: str) -> Optional[dict]:
+        """Get 3-month historical data from yfinance for technical analysis."""
         yf_symbol = f"{symbol}.NS"
         try:
             ticker = self.yf.Ticker(yf_symbol)
@@ -122,31 +186,77 @@ class StockDataFetcher:
             if not closes:
                 return None
 
-            info = ticker.info or {}
-            current_price = info.get("currentPrice") or info.get("regularMarketPrice") or closes[-1]
-
             return {
-                "symbol": symbol,
-                "current_price": current_price,
-                "prev_close": info.get("previousClose", closes[-2] if len(closes) > 1 else current_price),
-                "day_high": info.get("dayHigh", highs[-1] if highs else current_price),
-                "day_low": info.get("dayLow", lows[-1] if lows else current_price),
-                "volume": info.get("volume", volumes[-1] if volumes else 0),
-                "52w_high": info.get("fiftyTwoWeekHigh", max(highs) if highs else current_price),
-                "52w_low": info.get("fiftyTwoWeekLow", min(lows) if lows else current_price),
-                "market_cap": info.get("marketCap", 0),
-                "pe_ratio": info.get("trailingPE"),
                 "closes": closes[-60:],
                 "highs": highs[-60:],
                 "lows": lows[-60:],
                 "volumes": volumes[-60:],
             }
         except Exception as e:
-            logger.warning(f"Failed to fetch {symbol}: {e}")
+            logger.debug(f"yfinance history failed for {symbol}: {e}")
             return None
 
+    async def get_quote(self, symbol: str) -> Optional[dict]:
+        """Get live price from NSE + historical data from yfinance."""
+        # Step 1: Get historical data for technical analysis
+        history = self._fetch_yf_history(symbol)
+        if not history or not history["closes"]:
+            logger.warning(f"No historical data for {symbol}")
+            return None
+
+        # Step 2: Try NSE live price
+        nse_data = await self._fetch_nse_live(symbol)
+
+        if nse_data and nse_data.get("current_price"):
+            # Live NSE data available — merge with history
+            logger.debug(f"{symbol}: NSE LIVE Rs {nse_data['current_price']:,.2f} ({nse_data.get('change_pct', 0):+.2f}%)")
+            return {
+                "symbol": symbol,
+                "current_price": nse_data["current_price"],
+                "prev_close": nse_data["prev_close"],
+                "day_high": nse_data["day_high"],
+                "day_low": nse_data["day_low"],
+                "volume": nse_data["volume"],
+                "52w_high": nse_data["52w_high"],
+                "52w_low": nse_data["52w_low"],
+                "market_cap": nse_data.get("market_cap", 0),
+                "pe_ratio": nse_data.get("pe_ratio"),
+                "closes": history["closes"],
+                "highs": history["highs"],
+                "lows": history["lows"],
+                "volumes": history["volumes"],
+                "source": "NSE_LIVE",
+            }
+        else:
+            # Fallback to yfinance for current price too
+            yf_symbol = f"{symbol}.NS"
+            try:
+                info = self.yf.Ticker(yf_symbol).info or {}
+                current_price = info.get("currentPrice") or info.get("regularMarketPrice") or history["closes"][-1]
+            except Exception:
+                current_price = history["closes"][-1]
+
+            logger.debug(f"{symbol}: yfinance fallback Rs {current_price:,.2f}")
+            return {
+                "symbol": symbol,
+                "current_price": current_price,
+                "prev_close": history["closes"][-2] if len(history["closes"]) > 1 else current_price,
+                "day_high": history["highs"][-1] if history["highs"] else current_price,
+                "day_low": history["lows"][-1] if history["lows"] else current_price,
+                "volume": history["volumes"][-1] if history["volumes"] else 0,
+                "52w_high": max(history["highs"]) if history["highs"] else current_price,
+                "52w_low": min(history["lows"]) if history["lows"] else current_price,
+                "market_cap": 0,
+                "pe_ratio": None,
+                "closes": history["closes"],
+                "highs": history["highs"],
+                "lows": history["lows"],
+                "volumes": history["volumes"],
+                "source": "YFINANCE_FALLBACK",
+            }
+
     async def close(self):
-        pass
+        await self._nse_client.aclose()
 
 
 # ── Technical Analysis ────────────────────────────────────────────────────────
