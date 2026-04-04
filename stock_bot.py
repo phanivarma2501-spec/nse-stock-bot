@@ -24,10 +24,8 @@ from pathlib import Path
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
-_GEMINI_FALLBACK = "AIzaSyCLIzUocTlRCqRmMIyWZYatdEXW0l-MYDQ"
-
 class Settings(BaseSettings):
-    GEMINI_API_KEY: str = _GEMINI_FALLBACK
+    GEMINI_API_KEY: str = ""
     PHASE: int = 1
     PAPER_TRADING: bool = True
     LIVE_TRADING_ENABLED: bool = False
