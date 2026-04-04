@@ -9,10 +9,14 @@ import aiosqlite
 from contextlib import asynccontextmanager
 from loguru import logger
 
+_FALLBACK_URL = "libsql://nse-stock-bot-db-phanivarma2501-spec.aws-ap-south-1.turso.io"
+_FALLBACK_TOKEN = "eyJhbGciOiJFZERTQSIsInR5cCI6IkpXVCJ9.eyJhIjoicnciLCJpYXQiOjE3NzUxMTUzOTIsImlkIjoiMDE5ZDRkMWYtMzgwMS03NzVmLTk3MGUtZGI1M2U2YWQxNjNiIiwicmlkIjoiNjk1NGYxNDQtNzQ4OS00NDE2LTkwZWQtMGEyZjE2YTY5NGI5In0.DRNUC_sV99dLo2nlm87gLKlLtn89o7JMIHUir8pbzLA-Ze_QZMZO_QmcWC49PQyG4tP1-IXzJsl__v8hplPFBw"
+
+
 def _get_turso_config():
-    """Read Turso config from env vars at call time (not import time)."""
-    url = os.environ.get("TURSO_DATABASE_URL", "")
-    token = os.environ.get("TURSO_AUTH_TOKEN", "")
+    """Read Turso config from env vars, fall back to hardcoded defaults (private repo only)."""
+    url = os.environ.get("TURSO_DATABASE_URL", "") or _FALLBACK_URL
+    token = os.environ.get("TURSO_AUTH_TOKEN", "") or _FALLBACK_TOKEN
     return url, token
 
 
