@@ -107,9 +107,8 @@ class StockDataFetcher:
     NSE_BASE_URL = "https://www.nseindia.com"
 
     def __init__(self):
-        import yfinance as yf
-        self.yf = yf
         self._nse_cookies = None
+        self._http = httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         self._nse_client = httpx.AsyncClient(
             timeout=15,
             headers={
@@ -171,23 +170,27 @@ class StockDataFetcher:
             logger.debug(f"NSE live fetch failed for {symbol}: {e}")
             return None
 
-    def _fetch_yf_history(self, symbol: str) -> Optional[dict]:
-        """Get 3-month historical data from yfinance for technical analysis."""
+    async def _fetch_yf_history(self, symbol: str) -> Optional[dict]:
+        """Get 3-month historical data from Yahoo Finance HTTP API (no pandas/numpy)."""
         yf_symbol = f"{symbol}.NS"
         try:
-            ticker = self.yf.Ticker(yf_symbol)
-            hist = ticker.history(period="3mo")
-            if hist.empty:
+            resp = await self._http.get(
+                f"https://query1.finance.yahoo.com/v8/finance/chart/{yf_symbol}",
+                params={"interval": "1d", "range": "3mo"},
+            )
+            if resp.status_code != 200:
                 return None
-
-            closes = hist["Close"].dropna().tolist()
-            highs = hist["High"].dropna().tolist()
-            lows = hist["Low"].dropna().tolist()
-            volumes = hist["Volume"].dropna().tolist()
-
+            data = resp.json()
+            result = data.get("chart", {}).get("result", [])
+            if not result:
+                return None
+            quote = result[0].get("indicators", {}).get("quote", [{}])[0]
+            closes = [c for c in (quote.get("close") or []) if c is not None]
+            highs = [h for h in (quote.get("high") or []) if h is not None]
+            lows = [l for l in (quote.get("low") or []) if l is not None]
+            volumes = [v for v in (quote.get("volume") or []) if v is not None]
             if not closes:
                 return None
-
             return {
                 "closes": closes[-60:],
                 "highs": highs[-60:],
@@ -195,13 +198,13 @@ class StockDataFetcher:
                 "volumes": volumes[-60:],
             }
         except Exception as e:
-            logger.debug(f"yfinance history failed for {symbol}: {e}")
+            logger.debug(f"Yahoo history failed for {symbol}: {e}")
             return None
 
     async def get_quote(self, symbol: str) -> Optional[dict]:
-        """Get live price from NSE + historical data from yfinance."""
+        """Get live price from NSE + historical data from Yahoo HTTP API."""
         # Step 1: Get historical data for technical analysis
-        history = self._fetch_yf_history(symbol)
+        history = await self._fetch_yf_history(symbol)
         if not history or not history["closes"]:
             logger.warning(f"No historical data for {symbol}")
             return None
@@ -210,7 +213,6 @@ class StockDataFetcher:
         nse_data = await self._fetch_nse_live(symbol)
 
         if nse_data and nse_data.get("current_price"):
-            # Live NSE data available — merge with history
             logger.debug(f"{symbol}: NSE LIVE Rs {nse_data['current_price']:,.2f} ({nse_data.get('change_pct', 0):+.2f}%)")
             return {
                 "symbol": symbol,
@@ -230,15 +232,9 @@ class StockDataFetcher:
                 "source": "NSE_LIVE",
             }
         else:
-            # Fallback to yfinance for current price too
-            yf_symbol = f"{symbol}.NS"
-            try:
-                info = self.yf.Ticker(yf_symbol).info or {}
-                current_price = info.get("currentPrice") or info.get("regularMarketPrice") or history["closes"][-1]
-            except Exception:
-                current_price = history["closes"][-1]
-
-            logger.debug(f"{symbol}: yfinance fallback Rs {current_price:,.2f}")
+            # Fallback: use last close from Yahoo history
+            current_price = history["closes"][-1]
+            logger.debug(f"{symbol}: Yahoo history fallback Rs {current_price:,.2f}")
             return {
                 "symbol": symbol,
                 "current_price": current_price,
@@ -254,11 +250,12 @@ class StockDataFetcher:
                 "highs": history["highs"],
                 "lows": history["lows"],
                 "volumes": history["volumes"],
-                "source": "YFINANCE_FALLBACK",
+                "source": "YAHOO_FALLBACK",
             }
 
     async def close(self):
         await self._nse_client.aclose()
+        await self._http.aclose()
 
 
 # ── Technical Analysis ────────────────────────────────────────────────────────
