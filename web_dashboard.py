@@ -69,6 +69,45 @@ async def api_actionable():
 async def api_open_trades():
     return await storage.get_open_trades()
 
+@app.get("/api/trades/live")
+async def api_trades_live():
+    """Open trades with current NSE live prices and unrealized P&L."""
+    from stock_bot import StockDataFetcher
+    trades = await storage.get_open_trades()
+    if not trades:
+        return []
+
+    fetcher = StockDataFetcher()
+    price_cache = {}
+
+    for trade in trades:
+        symbol = trade["symbol"]
+        if symbol not in price_cache:
+            quote = await fetcher.get_quote(symbol)
+            price_cache[symbol] = quote["current_price"] if quote else None
+
+        current_price = price_cache.get(symbol)
+        entry = trade["entry_price"]
+        size = trade["size_inr"]
+        is_buy = trade["signal"] == "BUY"
+
+        if current_price:
+            if is_buy:
+                pnl_pct = (current_price - entry) / entry
+            else:
+                pnl_pct = (entry - current_price) / entry
+            pnl_inr = size * pnl_pct
+            trade["current_price"] = round(current_price, 2)
+            trade["unrealized_pnl_inr"] = round(pnl_inr, 2)
+            trade["unrealized_pnl_pct"] = round(pnl_pct * 100, 2)
+        else:
+            trade["current_price"] = None
+            trade["unrealized_pnl_inr"] = None
+            trade["unrealized_pnl_pct"] = None
+
+    await fetcher.close()
+    return trades
+
 @app.get("/api/trades/closed")
 async def api_closed_trades():
     return await storage.get_closed_trades()
@@ -283,9 +322,10 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div id="tab-trades" class="tbl-wrap">
     <div id="portfolioBar" style="padding:12px 16px;background:#161b22;border-bottom:1px solid #21262d;display:flex;gap:24px;font-size:13px;"></div>
-    <h3 style="padding:12px 16px 4px;color:#c9d1d9;font-size:14px;">Open Positions</h3>
+    <div id="unrealizedBar" style="padding:10px 16px;background:#161b22;border-bottom:1px solid #21262d;font-size:13px;display:none;"></div>
+    <h3 style="padding:12px 16px 4px;color:#c9d1d9;font-size:14px;">Open Positions (Live P&L)</h3>
     <table>
-      <thead><tr><th>#</th><th>Side</th><th>Stock</th><th>Entry</th><th>SL</th><th>T1</th><th>Size</th><th>Opened</th></tr></thead>
+      <thead><tr><th>#</th><th>Side</th><th>Stock</th><th>Entry</th><th>Current</th><th>SL</th><th>T1</th><th>Size</th><th>P&L</th><th>P&L%</th><th>Opened</th></tr></thead>
       <tbody id="openBody"></tbody>
     </table>
     <h3 style="padding:12px 16px 4px;color:#c9d1d9;font-size:14px;">Closed Trades</h3>
@@ -440,19 +480,31 @@ async function loadPortfolio() {
 }
 
 async function loadOpenTrades() {
-  const trades = await(await fetch('/api/trades/open')).json();
+  const trades = await(await fetch('/api/trades/live')).json();
   const tbody = document.getElementById('openBody');
-  if (!trades.length) { tbody.innerHTML = '<tr><td colspan="8" style="text-align:center;color:#8b949e;padding:20px;">No open positions</td></tr>'; return; }
-  tbody.innerHTML = trades.map((t,i) => `<tr>
+  const bar = document.getElementById('unrealizedBar');
+  if (!trades.length) { tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:#8b949e;padding:20px;">No open positions</td></tr>'; bar.style.display='none'; return; }
+  let totalPnl = 0;
+  trades.forEach(t => { if (t.unrealized_pnl_inr != null) totalPnl += t.unrealized_pnl_inr; });
+  bar.style.display = 'flex';
+  bar.innerHTML = `<span>Unrealized P&L: <b style="color:${totalPnl>=0?'#3fb950':'#f85149'}">${totalPnl>=0?'+':''}${INR(totalPnl)}</b></span><span style="margin-left:16px;color:#8b949e;font-size:11px;">Live NSE prices | Updates every 30s</span>`;
+  tbody.innerHTML = trades.map((t,i) => {
+    const pnl = t.unrealized_pnl_inr;
+    const pnlPct = t.unrealized_pnl_pct;
+    const pnlColor = pnl!=null ? (pnl>=0?'#3fb950':'#f85149') : '#8b949e';
+    return `<tr>
     <td>${i+1}</td>
     <td><span class="sig ${sigClass(t.signal)}">${t.signal}</span></td>
     <td><b>${t.symbol}</b></td>
     <td>${INR(t.entry_price)}</td>
+    <td style="font-weight:600">${t.current_price ? INR(t.current_price) : '-'}</td>
     <td style="color:#f85149">${INR(t.stop_loss)}</td>
     <td style="color:#3fb950">${INR(t.target_1)}</td>
     <td>${INR(t.size_inr)}</td>
+    <td style="color:${pnlColor};font-weight:600">${pnl!=null?(pnl>=0?'+':'')+INR(pnl):'-'}</td>
+    <td style="color:${pnlColor};font-size:11px">${pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(2)+'%':'-'}</td>
     <td style="font-size:11px;color:#8b949e">${fmtDate(t.entered_at)}</td>
-  </tr>`).join('');
+  </tr>`;}).join('');
 }
 
 async function loadClosedTrades() {
