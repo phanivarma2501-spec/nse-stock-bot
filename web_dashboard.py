@@ -16,7 +16,10 @@ storage = Storage()
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    await storage.init()
+    try:
+        await storage.init()
+    except Exception as e:
+        print(f"[WARNING] Storage init failed: {e} — dashboard will start but data may be empty", flush=True)
     yield
 
 
