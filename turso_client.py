@@ -200,7 +200,8 @@ class _AiosqliteWrapper:
 async def connect(local_path=None):
     """
     Smart connection: uses Turso when configured, aiosqlite otherwise.
-    Provides the same async context manager interface.
+    On Railway: REQUIRES Turso — refuses to fall back to local SQLite.
+    Locally: uses aiosqlite if Turso vars are not set.
     """
     turso_url, turso_token = _get_turso_config()
     if turso_url and turso_token:
@@ -209,6 +210,12 @@ async def connect(local_path=None):
             yield conn
         finally:
             await conn.close()
+    elif os.environ.get("RAILWAY_ENVIRONMENT") or os.environ.get("PORT"):
+        # On Railway without Turso = data loss. Fail loud.
+        raise RuntimeError(
+            "FATAL: Running on Railway but TURSO_DATABASE_URL / TURSO_AUTH_TOKEN not set. "
+            "Data will be lost on redeploy. Add Turso env vars in Railway dashboard."
+        )
     else:
         async with aiosqlite.connect(local_path) as db:
             await db.execute("PRAGMA journal_mode=WAL")
