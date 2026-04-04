@@ -3,22 +3,29 @@ server.py - Combined bot + web dashboard for Railway deployment
 Runs the scan loop in background + serves the dashboard on PORT.
 """
 
-import asyncio
-import os
 import sys
+import os
 import io
-import time
-import threading
-import uvicorn
-from loguru import logger
+
+print(f"[BOOT] server.py starting, Python {sys.version}", flush=True)
+print(f"[BOOT] PORT={os.environ.get('PORT', 'not set')}", flush=True)
 
 # Fix Windows emoji encoding
 if sys.platform == "win32":
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
+import asyncio
+import time
+import threading
+import uvicorn
+from loguru import logger
+
+print("[BOOT] importing web_dashboard...", flush=True)
 from web_dashboard import app
+print("[BOOT] importing stock_bot...", flush=True)
 from stock_bot import StockBotEngine
+print("[BOOT] all imports OK", flush=True)
 
 
 def run_bot():
