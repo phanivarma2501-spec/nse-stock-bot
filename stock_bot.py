@@ -433,9 +433,10 @@ Rules:
 
 
 class StockReasoningEngine:
+    GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+
     def __init__(self):
-        from google import genai
-        self.client = genai.Client(api_key=settings.GEMINI_API_KEY)
+        self.api_key = settings.GEMINI_API_KEY
 
     def analyse(self, stock: dict, quote: dict, tech: dict, news_context: str = "", news_stats: dict = None) -> Optional[StockSignal]:
         current = quote["current_price"]
@@ -468,15 +469,21 @@ class StockReasoningEngine:
             news_total=news_stats.get("total", 0),
         )
         try:
-            response = self.client.models.generate_content(
-                model="gemini-2.5-flash",
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "temperature": 0.3,
+            import httpx
+            resp = httpx.post(
+                f"{self.GEMINI_URL}?key={self.api_key}",
+                json={
+                    "contents": [{"parts": [{"text": prompt}]}],
+                    "generationConfig": {
+                        "responseMimeType": "application/json",
+                        "temperature": 0.3,
+                    },
                 },
+                timeout=60,
             )
-            raw = response.text.strip()
+            resp.raise_for_status()
+            result = resp.json()
+            raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
             data = json.loads(raw)
             confidence = float(data.get("confidence", 0.5))
             if confidence < settings.MIN_CONFIDENCE:
