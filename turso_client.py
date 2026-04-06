@@ -143,7 +143,9 @@ class _DictRow(dict):
 def _convert_param(value):
     """Convert Python value to Turso API format."""
     if value is None:
-        return {"type": "null", "value": None}
+        return {"type": "null"}
+    elif isinstance(value, bool):
+        return {"type": "integer", "value": str(int(value))}
     elif isinstance(value, int):
         return {"type": "integer", "value": str(value)}
     elif isinstance(value, float):

@@ -155,6 +155,63 @@ async def api_sectors():
             return [dict(r) for r in await c.fetchall()]
 
 
+@app.get("/api/debug")
+async def api_debug():
+    """Debug endpoint — shows bot thread status and last errors."""
+    import threading
+    from stock_bot import StockBotEngine
+    try:
+        from server import _bot_last_error
+    except ImportError:
+        _bot_last_error = {"error": None, "time": None, "restart_count": 0}
+    turso_ok = False
+    turso_error = None
+    try:
+        async with turso_connect(settings.DB_PATH) as db:
+            async with db.execute("SELECT COUNT(*) as cnt FROM signals") as c:
+                await c.fetchone()
+            turso_ok = True
+    except Exception as e:
+        turso_error = str(e)
+    threads = [t.name for t in threading.enumerate()]
+    bot_alive = any("bot" in t.lower() for t in threads)
+    is_market = StockBotEngine.is_market_hours()
+    return {
+        "bot_thread_alive": bot_alive,
+        "market_hours": is_market,
+        "turso_connected": turso_ok,
+        "turso_error": turso_error,
+        "last_error": _bot_last_error["error"],
+        "last_error_time": _bot_last_error["time"],
+        "restart_count": _bot_last_error["restart_count"],
+        "threads": threads,
+        "thread_count": len(threads),
+        "gemini_key_set": bool(settings.GEMINI_API_KEY),
+    }
+
+
+@app.get("/api/status")
+async def api_status():
+    """Health check with DB connectivity."""
+    import threading
+    db_ok = False
+    perf = {}
+    try:
+        perf = await storage.get_portfolio_summary()
+        db_ok = True
+    except Exception as e:
+        perf = {"error": str(e)}
+    threads = [t.name for t in threading.enumerate()]
+    return {
+        "status": "ok" if db_ok else "db_error",
+        "db_connected": db_ok,
+        "total_trades": perf.get("total_trades", 0),
+        "open_trades": perf.get("open_trades", 0),
+        "threads": threads,
+        "message": "Waiting for first scan..." if perf.get("total_trades", 0) == 0 else "Bot is running",
+    }
+
+
 @app.get("/", response_class=HTMLResponse)
 async def dashboard():
     return DASHBOARD_HTML

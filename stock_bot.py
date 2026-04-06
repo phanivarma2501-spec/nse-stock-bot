@@ -741,18 +741,26 @@ class StockBotEngine:
             logger.info("Market closed - skipping scan")
             return []
         # Check existing positions for SL/T1 hits
-        closed = await self.storage.check_open_trades(self.fetcher)
-        if closed:
-            logger.info(f"Closed {closed} paper trades (SL/T1 hit)")
+        try:
+            closed = await self.storage.check_open_trades(self.fetcher)
+            if closed:
+                logger.info(f"Closed {closed} paper trades (SL/T1 hit)")
+        except Exception as e:
+            logger.error(f"Error checking open trades: {e}")
 
         logger.info(f"=== NSE Scan started - {len(NSE_WATCHLIST)} stocks ===")
         signals = []
         for stock in NSE_WATCHLIST:
-            sig = await self.scan_stock(stock)
-            if sig and sig.signal in ("BUY", "SELL"):
-                signals.append(sig)
-                # Open paper trade
-                await self.storage.open_paper_trade(sig)
+            try:
+                sig = await self.scan_stock(stock)
+                if sig and sig.signal in ("BUY", "SELL"):
+                    signals.append(sig)
+                    try:
+                        await self.storage.open_paper_trade(sig)
+                    except Exception as e:
+                        logger.error(f"Failed to open paper trade for {sig.symbol}: {e}")
+            except Exception as e:
+                logger.error(f"Error scanning {stock['symbol']}: {e}")
             await asyncio.sleep(0.5)
         buys = [s for s in signals if s.signal == "BUY"]
         sells = [s for s in signals if s.signal == "SELL"]

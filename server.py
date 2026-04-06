@@ -21,6 +21,9 @@ import uvicorn
 from loguru import logger
 
 
+_bot_last_error = {"error": None, "time": None, "restart_count": 0}
+
+
 def run_bot():
     """Run the stock bot scan loop with auto-restart."""
     while True:
@@ -32,9 +35,13 @@ def run_bot():
             engine = StockBotEngine()
             loop.run_until_complete(engine.run())
         except BaseException as e:
-            import traceback
+            import traceback as tb
+            from datetime import datetime
+            _bot_last_error["error"] = f"{type(e).__name__}: {e}\n{tb.format_exc()[-500:]}"
+            _bot_last_error["time"] = datetime.utcnow().isoformat()
+            _bot_last_error["restart_count"] += 1
             logger.error(f"[BOT-THREAD] ERROR: {type(e).__name__}: {e}")
-            traceback.print_exc()
+            tb.print_exc()
             time.sleep(60)
 
 
