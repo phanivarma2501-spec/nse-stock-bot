@@ -202,25 +202,74 @@ class StockDataFetcher:
 
     def __init__(self):
         self._nse_cookies = None
+        self._nse_cookie_time = None
+        self._nse_blocked = False  # If True, skip NSE and use Yahoo only
         self._http = httpx.AsyncClient(timeout=15, headers={"User-Agent": "Mozilla/5.0"})
         self._nse_client = httpx.AsyncClient(
             timeout=15,
             headers={
-                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-                "Accept": "application/json, text/plain, */*",
-                "Accept-Language": "en-US,en;q=0.9",
-                "Referer": "https://www.nseindia.com/",
+                "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+                "Accept-Language": "en-US,en;q=0.9,hi;q=0.8",
+                "Accept-Encoding": "gzip, deflate, br",
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
             },
             follow_redirects=True,
         )
 
+    async def _refresh_nse_cookies(self):
+        """Visit NSE homepage to get session cookies. Required before API calls."""
+        import time
+        # Skip if cookies are fresh (< 5 min old)
+        if self._nse_cookies and self._nse_cookie_time and (time.time() - self._nse_cookie_time < 300):
+            return True
+        try:
+            resp = await self._nse_client.get(
+                self.NSE_BASE_URL,
+                headers={"Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"},
+            )
+            if resp.status_code == 200:
+                self._nse_cookies = dict(resp.cookies)
+                self._nse_cookie_time = time.time()
+                self._nse_blocked = False
+                logger.debug(f"NSE cookies refreshed: {list(self._nse_cookies.keys())}")
+                return True
+            else:
+                logger.debug(f"NSE homepage returned {resp.status_code} — likely IP-blocked")
+                self._nse_blocked = True
+                return False
+        except Exception as e:
+            logger.debug(f"NSE cookie refresh failed: {e}")
+            self._nse_blocked = True
+            return False
+
     async def _fetch_nse_live(self, symbol: str) -> Optional[dict]:
         """Get real-time quote from NSE India API."""
+        # Skip NSE entirely if we know it's blocked (cloud IP)
+        if self._nse_blocked:
+            return None
         try:
+            # Ensure we have valid session cookies
+            await self._refresh_nse_cookies()
+            if self._nse_blocked:
+                return None
+
             referer = f"https://www.nseindia.com/get-quotes/equity?symbol={symbol}"
             url = self.NSE_QUOTE_URL.format(symbol=symbol)
-            resp = await self._nse_client.get(url, headers={"Referer": referer})
+            resp = await self._nse_client.get(
+                url,
+                headers={
+                    "Referer": referer,
+                    "Accept": "application/json, text/plain, */*",
+                },
+                cookies=self._nse_cookies,
+            )
 
+            if resp.status_code == 403:
+                logger.info(f"NSE API 403 — IP blocked by NSE. Switching to Yahoo-only mode.")
+                self._nse_blocked = True
+                return None
             if resp.status_code != 200:
                 logger.debug(f"NSE API {resp.status_code} for {symbol}")
                 return None
@@ -265,7 +314,8 @@ class StockDataFetcher:
             return None
 
     async def _fetch_yf_history(self, symbol: str) -> Optional[dict]:
-        """Get 3-month historical data from Yahoo Finance HTTP API (no pandas/numpy)."""
+        """Get 3-month historical data from Yahoo Finance HTTP API (no pandas/numpy).
+        Also extracts real-time quote data from the chart metadata."""
         yf_symbol = f"{symbol}.NS"
         try:
             resp = await self._http.get(
@@ -273,11 +323,18 @@ class StockDataFetcher:
                 params={"interval": "1d", "range": "3mo"},
             )
             if resp.status_code != 200:
-                return None
+                # Try BSE suffix as fallback
+                resp = await self._http.get(
+                    f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}.BO",
+                    params={"interval": "1d", "range": "3mo"},
+                )
+                if resp.status_code != 200:
+                    return None
             data = resp.json()
             result = data.get("chart", {}).get("result", [])
             if not result:
                 return None
+            meta = result[0].get("meta", {})
             quote = result[0].get("indicators", {}).get("quote", [{}])[0]
             closes = [c for c in (quote.get("close") or []) if c is not None]
             highs = [h for h in (quote.get("high") or []) if h is not None]
@@ -285,11 +342,18 @@ class StockDataFetcher:
             volumes = [v for v in (quote.get("volume") or []) if v is not None]
             if not closes:
                 return None
+            # Extract real-time price from chart metadata (more current than last close)
+            regular_price = meta.get("regularMarketPrice")
+            prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
             return {
                 "closes": closes[-60:],
                 "highs": highs[-60:],
                 "lows": lows[-60:],
                 "volumes": volumes[-60:],
+                "regular_market_price": regular_price,
+                "chart_prev_close": prev_close,
+                "fifty_two_week_high": meta.get("fiftyTwoWeekHigh"),
+                "fifty_two_week_low": meta.get("fiftyTwoWeekLow"),
             }
         except Exception as e:
             logger.debug(f"Yahoo history failed for {symbol}: {e}")
@@ -326,18 +390,21 @@ class StockDataFetcher:
                 "source": "NSE_LIVE",
             }
         else:
-            # Fallback: use last close from Yahoo history
-            current_price = history["closes"][-1]
-            logger.debug(f"{symbol}: Yahoo history fallback Rs {current_price:,.2f}")
+            # Fallback: use Yahoo real-time price from chart metadata, or last close
+            current_price = history.get("regular_market_price") or history["closes"][-1]
+            prev_close = history.get("chart_prev_close") or (history["closes"][-2] if len(history["closes"]) > 1 else current_price)
+            w52h = history.get("fifty_two_week_high") or (max(history["highs"]) if history["highs"] else current_price)
+            w52l = history.get("fifty_two_week_low") or (min(history["lows"]) if history["lows"] else current_price)
+            logger.debug(f"{symbol}: Yahoo fallback Rs {current_price:,.2f}")
             return {
                 "symbol": symbol,
                 "current_price": current_price,
-                "prev_close": history["closes"][-2] if len(history["closes"]) > 1 else current_price,
+                "prev_close": prev_close,
                 "day_high": history["highs"][-1] if history["highs"] else current_price,
                 "day_low": history["lows"][-1] if history["lows"] else current_price,
                 "volume": history["volumes"][-1] if history["volumes"] else 0,
-                "52w_high": max(history["highs"]) if history["highs"] else current_price,
-                "52w_low": min(history["lows"]) if history["lows"] else current_price,
+                "52w_high": w52h,
+                "52w_low": w52l,
                 "market_cap": 0,
                 "pe_ratio": None,
                 "closes": history["closes"],
