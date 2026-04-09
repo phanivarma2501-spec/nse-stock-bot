@@ -25,14 +25,17 @@ from pathlib import Path
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 class Settings(BaseSettings):
-    GEMINI_API_KEY: str = ""
+    DEEPSEEK_API_KEY: str = ""
+    DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
+    DEEPSEEK_MODEL: str = "deepseek-chat"
+    GEMINI_API_KEY: str = ""  # kept for fallback / migration, not used
     PHASE: int = 1
     PAPER_TRADING: bool = True
     LIVE_TRADING_ENABLED: bool = False
-    STARTING_CAPITAL: float = 100000.0  # ₹1 lakh default
+    STARTING_CAPITAL: float = 100000.0  # Rs 1 lakh default
     DB_PATH: str = "/app/data/stock_bot.db" if os.environ.get("RAILWAY_ENVIRONMENT") else "data/stock_bot.db"
     SCAN_INTERVAL_MINUTES: int = 60
-    MIN_CONFIDENCE: float = 0.65
+    MIN_CONFIDENCE: float = 0.55  # lowered from 0.65 — DeepSeek produces lower confidence than Gemini
     MAX_POSITION_PCT: float = 0.05  # 5% per stock
     TRADING_MODES: list = ["swing", "intraday", "positional"]
 
@@ -594,10 +597,14 @@ Rules:
 
 
 class StockReasoningEngine:
-    GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent"
+    """DeepSeek V3 via OpenAI-compatible REST API. Switched from Gemini 2.5
+    Flash on 2026-04-09 to reduce API costs ($90/5 days on Gemini).
+    DeepSeek is ~10-20x cheaper per token."""
+
+    DEEPSEEK_CHAT_URL = "https://api.deepseek.com/chat/completions"
 
     def __init__(self):
-        self.api_key = settings.GEMINI_API_KEY
+        self.api_key = settings.DEEPSEEK_API_KEY
 
     def analyse(self, stock: dict, quote: dict, tech: dict, news_context: str = "", news_stats: dict = None) -> Optional[StockSignal]:
         current = quote["current_price"]
@@ -632,19 +639,23 @@ class StockReasoningEngine:
         try:
             import httpx
             resp = httpx.post(
-                f"{self.GEMINI_URL}?key={self.api_key}",
+                self.DEEPSEEK_CHAT_URL,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
                 json={
-                    "contents": [{"parts": [{"text": prompt}]}],
-                    "generationConfig": {
-                        "responseMimeType": "application/json",
-                        "temperature": 0.3,
-                    },
+                    "model": settings.DEEPSEEK_MODEL,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "temperature": 0.3,
+                    "max_tokens": 1500,
+                    "response_format": {"type": "json_object"},
                 },
                 timeout=60,
             )
             resp.raise_for_status()
             result = resp.json()
-            raw = result["candidates"][0]["content"]["parts"][0]["text"].strip()
+            raw = result["choices"][0]["message"]["content"].strip()
             data = json.loads(raw)
             confidence = float(data.get("confidence", 0.5))
             if confidence < settings.MIN_CONFIDENCE:
