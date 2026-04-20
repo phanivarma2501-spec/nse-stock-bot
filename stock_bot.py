@@ -542,6 +542,12 @@ class TechnicalAnalyser:
 STOCK_REASONING_PROMPT = """You are an expert Indian stock market analyst with deep knowledge of NSE/BSE.
 Analyse this stock and generate precise trading signals.
 
+IMPORTANT — Signal balance:
+You must generate a balanced mix of BUY, SELL, and HOLD signals based purely on the
+technical data provided. If market data is insufficient to justify a strong directional
+view, output HOLD. SELL signals are equally valid as BUY signals — do not default to BUY.
+Overbought RSI + weak momentum is a SELL/HOLD setup, not a BUY.
+
 ## Stock Data
 Symbol: {symbol} ({name}) | Sector: {sector}
 Current Price: ₹{current_price}
@@ -558,9 +564,8 @@ Support: ₹{support} | Resistance: ₹{resistance} | Pivot: ₹{pivot}
 From 52W High: {from_52h}% | From 52W Low: {from_52l}%
 
 ## Market Context
-Nifty50 trend: Generally bullish in 2026
-Sector rotation: {sector} sector current conditions
-FII/DII: Net buyers in recent sessions
+Nifty50 trend: Base your view on the technical analysis below.
+Sector: {sector}
 
 ## Recent News & Sentiment ({news_bias} bias from {news_total} articles)
 {news_context}
@@ -584,15 +589,17 @@ Respond ONLY with valid JSON, no markdown:
 
 Rules:
 - Entry must be within 1% of current price
-- Stop loss: 2-4% below entry for swing, 1-1.5% for intraday
-- Target 1: 3-5% above entry (swing), 1.5-2% intraday
-- Target 2: 5-8% above entry
-- Target 3: 8-15% above entry (positional)
+- For BUY: stop loss is 2-4% BELOW entry (swing) or 1-1.5% below (intraday);
+  targets are ABOVE entry (T1: 3-5% swing / 1.5-2% intraday, T2: 5-8%, T3: 8-15%)
+- For SELL: stop loss is 2-4% ABOVE entry (swing) or 1-1.5% above (intraday);
+  targets are BELOW entry (T1: 3-5% swing / 1.5-2% intraday, T2: 5-8%, T3: 8-15%)
+- For HOLD: set entry=current_price, stop_loss=entry, targets=entry
 - Risk/reward must be at least 2:1
 - Confidence below 0.65 → always HOLD
 - News from last 24h carries 2x weight vs older news
-- Strong bearish news overrides bullish technicals → HOLD or SELL
-- Strong bullish news with bullish technicals → increase confidence
+- Strong bearish news + bearish technicals → SELL
+- Strong bullish news + bullish technicals → BUY
+- Conflicting signals or weak conviction → HOLD
 - Be specific about NSE/BSE context and Indian market factors"""
 
 
@@ -660,11 +667,29 @@ class StockReasoningEngine:
             confidence = float(data.get("confidence", 0.5))
             if confidence < settings.MIN_CONFIDENCE:
                 data["signal"] = "HOLD"
+            # Overbought guardrail: a BUY into RSI>65 needs strong conviction.
+            # Counteracts the LLM's observed BUY bias when momentum is stretched.
+            if tech["rsi"] > 65 and data.get("signal") == "BUY" and confidence <= 0.75:
+                logger.debug(f"{stock['symbol']}: BUY downgraded to HOLD (RSI {tech['rsi']} > 65, conf {confidence:.2f})")
+                data["signal"] = "HOLD"
             entry = float(data.get("entry_price", current))
-            sl = float(data.get("stop_loss", entry * 0.97))
-            t1 = float(data.get("target_1", entry * 1.04))
-            risk = entry - sl
-            reward = t1 - entry
+            # Direction-aware defaults and risk/reward math — SELL flips signs.
+            sig_dir = data.get("signal", "HOLD")
+            if sig_dir == "SELL":
+                sl = float(data.get("stop_loss", entry * 1.03))
+                t1 = float(data.get("target_1", entry * 0.96))
+                t2_default = entry * 0.93
+                t3_default = entry * 0.88
+                risk = sl - entry
+                reward = entry - t1
+            else:
+                # BUY and HOLD use long-side math; HOLD will have zero risk/reward anyway
+                sl = float(data.get("stop_loss", entry * 0.97))
+                t1 = float(data.get("target_1", entry * 1.04))
+                t2_default = entry * 1.07
+                t3_default = entry * 1.12
+                risk = entry - sl
+                reward = t1 - entry
             rr = round(reward / risk, 2) if risk > 0 else 0
             pos_pct = min(settings.MAX_POSITION_PCT, confidence * 0.05)
             pos_inr = settings.STARTING_CAPITAL * pos_pct
@@ -679,8 +704,8 @@ class StockReasoningEngine:
                 entry_price=entry,
                 stop_loss=sl,
                 target_1=t1,
-                target_2=float(data.get("target_2", entry * 1.07)),
-                target_3=float(data.get("target_3", entry * 1.12)),
+                target_2=float(data.get("target_2", t2_default)),
+                target_3=float(data.get("target_3", t3_default)),
                 risk_reward=rr,
                 position_size_pct=pos_pct,
                 position_size_inr=round(pos_inr, 0),
