@@ -10,14 +10,17 @@ from turso_client import connect as turso_connect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 from stock_bot import Storage, settings
+from paper_trades_fo import FOStorage
 
 storage = Storage()
+fo_storage = FOStorage(settings.DB_PATH)
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     try:
         await storage.init()
+        await fo_storage.init()
     except Exception as e:
         print(f"[WARNING] Storage init failed: {e} — dashboard will start but data may be empty", flush=True)
     yield
@@ -129,6 +132,83 @@ async def api_closed_trades():
 @app.get("/api/portfolio")
 async def api_portfolio():
     return await storage.get_portfolio_summary()
+
+
+# ── F&O endpoints ─────────────────────────────────────────────────────────────
+async def _fo_chain_summary(symbol: str, is_index: bool, expiry: str | None = None):
+    """Shared helper — build OptionsChainFetcher per call so the dashboard has
+    no long-lived NSE client holding cookies."""
+    from options_chain import OptionsChainFetcher, summarize_chain
+    f = OptionsChainFetcher()
+    try:
+        raw = await f.fetch_chain(symbol, is_index)
+        if not raw:
+            return None
+        return summarize_chain(raw, expiry)
+    finally:
+        await f.close()
+
+
+@app.get("/api/fo-summary")
+async def api_fo_summary():
+    return await fo_storage.get_summary()
+
+
+@app.get("/api/fo-trades/live")
+async def api_fo_live():
+    """Open F&O trades with current premium + unrealized P&L marked against NSE chain."""
+    async def summarize_for(symbol, is_index, expiry):
+        return await _fo_chain_summary(symbol, is_index, expiry)
+    return await fo_storage.mark_open_pnl(summarize_for)
+
+
+@app.get("/api/fo-trades/closed")
+async def api_fo_closed():
+    return await fo_storage.get_closed_trades(100)
+
+
+@app.get("/api/fo-signals")
+async def api_fo_signals():
+    """Today's F&O recommendations: runs the strategy engine against current chains
+    for the F&O universe (NIFTY, BANKNIFTY, 20 stocks) using the latest saved equity signal."""
+    from options_chain import INDICES, FNO_STOCKS, compute_pcr, compute_max_pain, iv_rank_in_chain, iv_regime
+    from options_strategy import recommend
+
+    async def latest_signal(symbol):
+        async with turso_connect(settings.DB_PATH) as db:
+            db.row_factory = True
+            async with db.execute(
+                "SELECT signal, strength, confidence FROM signals WHERE symbol=? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (symbol,),
+            ) as c:
+                row = await c.fetchone()
+        return dict(row) if row else {"signal": "HOLD", "strength": "WEAK", "confidence": 0.5}
+
+    out = []
+    for symbol, is_index in [(s, True) for s in INDICES] + [(s, False) for s in FNO_STOCKS]:
+        summary = await _fo_chain_summary(symbol, is_index)
+        if not summary:
+            continue
+        sig = await latest_signal(symbol)
+        rec = recommend(symbol, sig, summary, is_index)
+        row = {
+            "symbol": symbol,
+            "is_index": is_index,
+            "spot": summary["spot"],
+            "atm_strike": summary["atm_strike"],
+            "atm_iv": round(summary["atm_iv"], 2),
+            "iv_regime": iv_regime(summary["atm_iv"], is_index),
+            "iv_rank_in_chain": iv_rank_in_chain(summary),
+            "pcr": compute_pcr(summary),
+            "max_pain": compute_max_pain(summary),
+            "expiry": summary["expiry"],
+            "equity_signal": sig.get("signal"),
+            "equity_strength": sig.get("strength"),
+            "recommendation": rec,  # may be None → "no trade"
+        }
+        out.append(row)
+    return out
 
 @app.get("/api/stats")
 async def api_stats():
@@ -389,6 +469,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
     <button class="tab" onclick="showTab('signals')">All Signals</button>
     <button class="tab" onclick="showTab('buysell')">BUY / SELL Only</button>
     <button class="tab" onclick="showTab('sectors')">Sector View</button>
+    <button class="tab" onclick="showTab('fno')">F&amp;O</button>
   </div>
 
   <div id="tab-trades" class="tbl-wrap">
@@ -430,6 +511,38 @@ DASHBOARD_HTML = """<!DOCTYPE html>
 
   <div id="tab-sectors" style="display:none">
     <div class="sector-grid" id="sectorGrid"></div>
+  </div>
+
+  <div id="tab-fno" class="tbl-wrap" style="display:none">
+    <div id="foSummaryBar" style="padding:12px 16px;background:#161b22;border-bottom:1px solid #21262d;display:flex;gap:24px;font-size:13px;flex-wrap:wrap;"></div>
+    <h3 style="padding:12px 16px 4px;color:#c9d1d9;font-size:14px;">Open F&amp;O Positions (Live P&amp;L)</h3>
+    <table>
+      <thead><tr>
+        <th>#</th><th>Symbol</th><th>Strategy</th><th>Dir</th><th>Expiry</th>
+        <th>Legs</th><th>Net Entry</th><th>Current</th><th>Target</th><th>SL</th>
+        <th>Size</th><th>P&amp;L</th><th>P&amp;L%</th><th>Opened</th>
+      </tr></thead>
+      <tbody id="foOpenBody"></tbody>
+    </table>
+
+    <h3 style="padding:16px 16px 4px;color:#c9d1d9;font-size:14px;">Today's Recommendations &amp; Chain Analytics</h3>
+    <table>
+      <thead><tr>
+        <th>Symbol</th><th>Spot</th><th>ATM</th><th>ATM IV</th><th>IV Regime</th>
+        <th>IV Rank</th><th>PCR</th><th>Max Pain</th><th>Expiry</th>
+        <th>Equity Sig</th><th>Strategy</th><th>Net Prem</th><th>Target</th><th>SL</th><th>R:R</th>
+      </tr></thead>
+      <tbody id="foSignalsBody"></tbody>
+    </table>
+
+    <h3 style="padding:16px 16px 4px;color:#c9d1d9;font-size:14px;">Closed F&amp;O Trades</h3>
+    <table>
+      <thead><tr>
+        <th>#</th><th>Symbol</th><th>Strategy</th><th>Expiry</th>
+        <th>Entry</th><th>Exit</th><th>Size</th><th>P&amp;L</th><th>P&amp;L%</th><th>Reason</th><th>Closed</th>
+      </tr></thead>
+      <tbody id="foClosedBody"></tbody>
+    </table>
   </div>
 </div>
 
@@ -532,8 +645,9 @@ async function loadSectors() {
 function showTab(name) {
   document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
   document.querySelectorAll('[id^="tab-"]').forEach(t => t.style.display = 'none');
-  document.getElementById('tab-' + name).style.display = name === 'sectors' ? 'block' : 'block';
+  document.getElementById('tab-' + name).style.display = 'block';
   event.target.classList.add('active');
+  if (name === 'fno') loadFo();
 }
 
 async function loadPortfolio() {
@@ -593,6 +707,104 @@ async function loadClosedTrades() {
     <td>${t.pnl_inr!=null?(t.pnl_inr>0?'WIN':'LOSS'):'-'}</td>
     <td style="font-size:11px;color:#8b949e">${fmtDate(t.exited_at)}</td>
   </tr>`).join('');
+}
+
+function fmtLegs(legs) {
+  if (!legs) return '-';
+  try {
+    if (typeof legs === 'string') legs = JSON.parse(legs);
+    return legs.map(l => `${l.action==='BUY'?'+':'-'}${l.type}${l.strike}@${Number(l.price).toFixed(1)}`).join(' / ');
+  } catch(e) { return '-'; }
+}
+
+async function loadFoSummary() {
+  const d = await (await fetch('/api/fo-summary')).json();
+  document.getElementById('foSummaryBar').innerHTML = `
+    <span>Total: <b>${d.total}</b></span>
+    <span>Open: <b style="color:#d29922">${d.open}</b></span>
+    <span>Closed: <b>${d.closed}</b></span>
+    <span>Wins: <b style="color:#3fb950">${d.wins}</b></span>
+    <span>Win Rate: <b style="color:${d.win_rate>=0.5?'#3fb950':'#f85149'}">${(d.win_rate*100).toFixed(0)}%</b></span>
+    <span>P&L: <b style="color:${d.total_pnl>=0?'#3fb950':'#f85149'}">${INR(d.total_pnl)}</b></span>
+    <span>Deployed: <b style="color:#58a6ff">${INR(d.deployed)}</b></span>
+  `;
+}
+
+async function loadFoOpen() {
+  const trades = await (await fetch('/api/fo-trades/live')).json();
+  const tbody = document.getElementById('foOpenBody');
+  if (!trades.length) { tbody.innerHTML = '<tr><td colspan="14" style="text-align:center;color:#8b949e;padding:20px;">No open F&amp;O positions</td></tr>'; return; }
+  tbody.innerHTML = trades.map((t,i) => {
+    const pnl = t.unrealized_pnl_inr, pnlPct = t.unrealized_pnl_pct;
+    const pnlColor = pnl!=null ? (pnl>=0?'#3fb950':'#f85149') : '#8b949e';
+    return `<tr>
+      <td>${i+1}</td>
+      <td><b>${t.symbol}</b></td>
+      <td style="font-size:11px">${t.strategy}</td>
+      <td>${t.direction||'-'}</td>
+      <td style="font-size:11px">${t.expiry}</td>
+      <td style="font-size:10px;color:#c9d1d9;max-width:200px;white-space:normal;">${fmtLegs(t.legs_json)}</td>
+      <td>${Number(t.net_premium).toFixed(2)}</td>
+      <td>${t.current_premium!=null?Number(t.current_premium).toFixed(2):'-'}</td>
+      <td style="color:#3fb950">${Number(t.target).toFixed(2)}</td>
+      <td style="color:#f85149">${Number(t.stop_loss).toFixed(2)}</td>
+      <td>${INR(t.size_inr)}</td>
+      <td style="color:${pnlColor};font-weight:600">${pnl!=null?(pnl>=0?'+':'')+INR(pnl):'-'}</td>
+      <td style="color:${pnlColor};font-size:11px">${pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(2)+'%':'-'}</td>
+      <td style="font-size:11px;color:#8b949e">${fmtDate(t.entered_at)}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadFoSignals() {
+  const rows = await (await fetch('/api/fo-signals')).json();
+  const tbody = document.getElementById('foSignalsBody');
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;color:#8b949e;padding:20px;">No F&amp;O data — chain fetch may be blocked (Railway IP).</td></tr>'; return; }
+  tbody.innerHTML = rows.map(r => {
+    const rec = r.recommendation;
+    const regimeColor = r.iv_regime === 'high' ? '#f85149' : r.iv_regime === 'low' ? '#3fb950' : '#d29922';
+    const stratCell = rec ? `<span style="color:#58a6ff;font-weight:600">${rec.strategy}</span>` : '<span style="color:#8b949e">no trade</span>';
+    return `<tr>
+      <td><b>${r.symbol}</b></td>
+      <td>${Number(r.spot).toFixed(2)}</td>
+      <td>${r.atm_strike}</td>
+      <td>${Number(r.atm_iv).toFixed(1)}%</td>
+      <td style="color:${regimeColor}">${r.iv_regime}</td>
+      <td>${Number(r.iv_rank_in_chain).toFixed(0)}%</td>
+      <td style="color:${r.pcr>1?'#f85149':'#3fb950'}">${r.pcr}</td>
+      <td>${r.max_pain}</td>
+      <td style="font-size:11px">${r.expiry}</td>
+      <td><span class="sig ${sigClass(r.equity_signal)}">${r.equity_signal||'-'}</span></td>
+      <td>${stratCell}</td>
+      <td>${rec?Number(rec.net_premium).toFixed(2):'-'}</td>
+      <td style="color:#3fb950">${rec?Number(rec.target).toFixed(2):'-'}</td>
+      <td style="color:#f85149">${rec?Number(rec.stop_loss).toFixed(2):'-'}</td>
+      <td>${rec?rec.risk_reward:'-'}</td>
+    </tr>`;
+  }).join('');
+}
+
+async function loadFoClosed() {
+  const trades = await (await fetch('/api/fo-trades/closed')).json();
+  const tbody = document.getElementById('foClosedBody');
+  if (!trades.length) { tbody.innerHTML = '<tr><td colspan="11" style="text-align:center;color:#8b949e;padding:20px;">No closed F&amp;O trades yet</td></tr>'; return; }
+  tbody.innerHTML = trades.map((t,i) => `<tr>
+    <td>${i+1}</td>
+    <td><b>${t.symbol}</b></td>
+    <td style="font-size:11px">${t.strategy}</td>
+    <td style="font-size:11px">${t.expiry}</td>
+    <td>${Number(t.net_premium).toFixed(2)}</td>
+    <td>${t.current_premium!=null?Number(t.current_premium).toFixed(2):'-'}</td>
+    <td>${INR(t.size_inr)}</td>
+    <td style="color:${(t.pnl_inr||0)>=0?'#3fb950':'#f85149'}">${t.pnl_inr!=null?(t.pnl_inr>=0?'+':'')+INR(t.pnl_inr):'-'}</td>
+    <td>${t.pnl_pct!=null?(t.pnl_pct>=0?'+':'')+t.pnl_pct.toFixed(2)+'%':'-'}</td>
+    <td style="font-size:11px;color:#8b949e">${t.close_reason||'-'}</td>
+    <td style="font-size:11px;color:#8b949e">${fmtDate(t.exited_at)}</td>
+  </tr>`).join('');
+}
+
+async function loadFo() {
+  await Promise.all([loadFoSummary(), loadFoOpen(), loadFoSignals(), loadFoClosed()]);
 }
 
 async function loadTicker() {

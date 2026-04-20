@@ -913,14 +913,23 @@ class StockBotEngine:
         self.storage = Storage()
         self.news = None
         self._running = False
+        # F&O paper trading (lazy-init in startup)
+        self.fo_fetcher = None
+        self.fo_storage = None
 
     async def startup(self):
         from news_fetcher import NewsIntelligence
+        from options_chain import OptionsChainFetcher
+        from paper_trades_fo import FOStorage
         self.news = NewsIntelligence()
+        self.fo_fetcher = OptionsChainFetcher()
+        self.fo_storage = FOStorage(settings.DB_PATH)
         await self.storage.init()
+        await self.fo_storage.init()
         logger.info(f"NSE Stock Bot started | Watching {len(NSE_WATCHLIST)} stocks")
         logger.info(f"Capital: ₹{settings.STARTING_CAPITAL:,.0f} | Max per trade: {settings.MAX_POSITION_PCT:.0%}")
         logger.info("News: MoneyControl + ET + Business Standard + Google News")
+        logger.info("F&O: NIFTY/BANKNIFTY + 20 F&O stocks, paper trading only")
 
     async def scan_stock(self, stock: dict) -> Optional[StockSignal]:
         quote = await self.fetcher.get_quote(stock["symbol"])
@@ -971,6 +980,11 @@ class StockBotEngine:
             await asyncio.sleep(1.0)  # Rate limit: ~100 stocks per scan needs spacing
         buys = [s for s in signals if s.signal == "BUY"]
         sells = [s for s in signals if s.signal == "SELL"]
+        # F&O scan (after equity so latest signals are saved)
+        try:
+            await self.run_fno_scan()
+        except Exception as e:
+            logger.error(f"F&O scan failed: {e}")
         # Portfolio summary
         portfolio = await self.storage.get_portfolio_summary()
         logger.info(
@@ -985,6 +999,72 @@ class StockBotEngine:
                 f"Conf: {s.confidence:.0%} | {s.trading_mode}"
             )
         return signals
+
+    async def _get_latest_signal(self, symbol: str) -> dict:
+        """Latest saved signal for a symbol, or a neutral fallback (used for indices)."""
+        async with self.storage._connect() as db:
+            db.row_factory = True
+            async with db.execute(
+                "SELECT signal, strength, confidence FROM signals WHERE symbol=? "
+                "ORDER BY timestamp DESC LIMIT 1",
+                (symbol,),
+            ) as c:
+                row = await c.fetchone()
+        if row:
+            return dict(row)
+        return {"signal": "HOLD", "strength": "WEAK", "confidence": 0.5}
+
+    async def _chain_summary_for(self, symbol: str, is_index: bool, expiry: Optional[str] = None):
+        """Thin wrapper so paper_trades_fo can call back into the fetcher/summarizer."""
+        from options_chain import summarize_chain
+        raw = await self.fo_fetcher.fetch_chain(symbol, is_index)
+        if not raw:
+            return None
+        return summarize_chain(raw, expiry)
+
+    async def run_fno_scan(self):
+        """Recommend + paper-trade F&O positions based on latest equity signals + live IV."""
+        from options_chain import INDICES, FNO_STOCKS, compute_pcr, compute_max_pain
+        from options_strategy import recommend
+
+        # First: mark open F&O trades to market and close on target/SL/expiry.
+        try:
+            closed = await self.fo_storage.mark_and_close(
+                self.fo_fetcher, None, self._chain_summary_for
+            )
+            if closed:
+                logger.info(f"F&O: closed {closed} position(s) on target/SL/expiry")
+        except Exception as e:
+            logger.error(f"F&O mark-and-close failed: {e}")
+
+        universe = [(s, True) for s in INDICES] + [(s, False) for s in FNO_STOCKS]
+        logger.info(f"=== F&O Scan started - {len(universe)} symbols ===")
+        opened = 0
+        for symbol, is_index in universe:
+            try:
+                summary = await self._chain_summary_for(symbol, is_index)
+                if not summary:
+                    logger.debug(f"F&O: chain unavailable for {symbol} — skip")
+                    continue
+                equity_sig = await self._get_latest_signal(symbol)
+                rec = recommend(symbol, equity_sig, summary, is_index)
+                if not rec:
+                    continue
+                rec["is_index"] = is_index
+                rec["pcr"] = compute_pcr(summary)
+                rec["max_pain"] = compute_max_pain(summary)
+                tid = await self.fo_storage.open_trade(rec)
+                if tid:
+                    opened += 1
+            except Exception as e:
+                logger.error(f"F&O error for {symbol}: {e}")
+            await asyncio.sleep(0.8)  # rate limit NSE
+        summary = await self.fo_storage.get_summary()
+        logger.info(
+            f"F&O scan complete | Opened: {opened} | Open: {summary['open']} | "
+            f"Closed: {summary['closed']} | Win rate: {summary['win_rate']:.0%} | "
+            f"P&L: Rs {summary['total_pnl']:+,.0f}"
+        )
 
     @staticmethod
     def is_market_hours() -> bool:
