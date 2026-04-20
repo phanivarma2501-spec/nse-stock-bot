@@ -256,7 +256,7 @@ DASHBOARD_HTML = """<!DOCTYPE html>
   }
   .ticker-strip {
     display: flex; align-items: center; height: 100%;
-    animation: scroll-left 45s linear infinite;
+    animation: scroll-left 300s linear infinite;
     white-space: nowrap; width: max-content;
   }
   .ticker-strip:hover { animation-play-state: paused; }
