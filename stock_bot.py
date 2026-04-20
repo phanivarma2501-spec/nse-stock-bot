@@ -595,7 +595,7 @@ Rules:
   targets are BELOW entry (T1: 3-5% swing / 1.5-2% intraday, T2: 5-8%, T3: 8-15%)
 - For HOLD: set entry=current_price, stop_loss=entry, targets=entry
 - Risk/reward must be at least 2:1
-- Confidence below 0.65 → always HOLD
+- Confidence below {min_confidence} → always HOLD
 - News from last 24h carries 2x weight vs older news
 - Strong bearish news + bearish technicals → SELL
 - Strong bullish news + bullish technicals → BUY
@@ -642,6 +642,7 @@ class StockReasoningEngine:
             news_context=news_context or "No recent news. Base analysis on technicals only.",
             news_bias=news_stats.get("bias", "neutral"),
             news_total=news_stats.get("total", 0),
+            min_confidence=settings.MIN_CONFIDENCE,
         )
         try:
             import httpx
