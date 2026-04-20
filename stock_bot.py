@@ -395,7 +395,14 @@ class StockDataFetcher:
         else:
             # Fallback: use Yahoo real-time price from chart metadata, or last close
             current_price = history.get("regular_market_price") or history["closes"][-1]
-            prev_close = history.get("chart_prev_close") or (history["closes"][-2] if len(history["closes"]) > 1 else current_price)
+            # Prefer the second-to-last daily close for prev_close. Yahoo's
+            # `chartPreviousClose` is the bar BEFORE the requested range starts
+            # (i.e. 3 months ago for range=3mo), not the prior trading day —
+            # using it produced 10-20% "daily change" artifacts in the ticker.
+            if len(history["closes"]) > 1:
+                prev_close = history["closes"][-2]
+            else:
+                prev_close = history.get("chart_prev_close") or current_price
             w52h = history.get("fifty_two_week_high") or (max(history["highs"]) if history["highs"] else current_price)
             w52l = history.get("fifty_two_week_low") or (min(history["lows"]) if history["lows"] else current_price)
             logger.debug(f"{symbol}: Yahoo fallback Rs {current_price:,.2f}")
