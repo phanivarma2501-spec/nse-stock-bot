@@ -28,29 +28,40 @@ app = FastAPI(title="NSE Stock Bot Dashboard", lifespan=lifespan)
 
 @app.get("/api/live-prices")
 async def api_live_prices():
-    """Fetch real-time NSE prices for all watchlist stocks."""
+    """Fetch prices for all watchlist stocks. Uses NSE live when available,
+    falls back to Yahoo (regular_market_price from chart metadata) when NSE
+    is 403/blocked. The previous implementation called _fetch_nse_live
+    directly with no fallback, which returned [] on every call from Railway
+    because the IP is geo-blocked."""
     from stock_bot import StockDataFetcher, NSE_WATCHLIST
     fetcher = StockDataFetcher()
-    prices = []
-    for stock in NSE_WATCHLIST:
+
+    async def quote_for(stock):
         try:
-            data = await fetcher._fetch_nse_live(stock["symbol"])
-            if data:
-                prices.append({
-                    "symbol": stock["symbol"],
-                    "name": stock["name"],
-                    "sector": stock["sector"],
-                    "price": data["current_price"],
-                    "change": data.get("change", 0),
-                    "change_pct": data.get("change_pct", 0),
-                    "day_high": data.get("day_high", 0),
-                    "day_low": data.get("day_low", 0),
-                    "source": "NSE_LIVE",
-                })
+            q = await fetcher.get_quote(stock["symbol"])
+            if not q:
+                return None
+            current = q["current_price"]
+            prev = q.get("prev_close") or current
+            change = current - prev
+            change_pct = (change / prev * 100) if prev else 0
+            return {
+                "symbol": stock["symbol"],
+                "name": stock["name"],
+                "sector": stock["sector"],
+                "price": current,
+                "change": round(change, 2),
+                "change_pct": round(change_pct, 2),
+                "day_high": q.get("day_high") or current,
+                "day_low": q.get("day_low") or current,
+                "source": q.get("source", "UNKNOWN"),
+            }
         except Exception:
-            pass
+            return None
+
+    results = await asyncio.gather(*(quote_for(s) for s in NSE_WATCHLIST))
     await fetcher.close()
-    return prices
+    return [r for r in results if r is not None]
 
 
 @app.get("/api/signals")
