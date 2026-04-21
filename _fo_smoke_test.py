@@ -14,11 +14,17 @@ import os
 import asyncio
 import sys
 
-# Force local sqlite (no Turso) for test
+# Force local sqlite (no Turso) for test.
+# turso_client has hardcoded _FALLBACK_URL + _FALLBACK_TOKEN, so popping env vars
+# alone is NOT enough — the client will still connect to production Turso. We
+# must also blank those module-level fallbacks before importing anything else.
 os.environ.pop("TURSO_DATABASE_URL", None)
 os.environ.pop("TURSO_AUTH_TOKEN", None)
 os.environ.pop("RAILWAY_ENVIRONMENT", None)
 os.environ.pop("PORT", None)
+import turso_client  # noqa: E402
+turso_client._FALLBACK_URL = ""
+turso_client._FALLBACK_TOKEN = ""
 
 from loguru import logger
 logger.remove()
