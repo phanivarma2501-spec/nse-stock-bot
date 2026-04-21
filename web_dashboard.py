@@ -136,15 +136,11 @@ async def api_portfolio():
 
 # ── F&O endpoints ─────────────────────────────────────────────────────────────
 async def _fo_chain_summary(symbol: str, is_index: bool, expiry: str | None = None):
-    """Shared helper — build OptionsChainFetcher per call so the dashboard has
-    no long-lived NSE client holding cookies."""
-    from options_chain import OptionsChainFetcher, summarize_chain
-    f = OptionsChainFetcher()
+    """Shared helper — uses Kite when configured, else direct NSE."""
+    from stock_bot import _build_fo_fetcher
+    f = _build_fo_fetcher()
     try:
-        raw = await f.fetch_chain(symbol, is_index)
-        if not raw:
-            return None
-        return summarize_chain(raw, expiry)
+        return await f.fetch_chain_summary(symbol, is_index, expiry)
     finally:
         await f.close()
 

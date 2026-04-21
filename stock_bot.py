@@ -919,17 +919,17 @@ class StockBotEngine:
 
     async def startup(self):
         from news_fetcher import NewsIntelligence
-        from options_chain import OptionsChainFetcher
         from paper_trades_fo import FOStorage
         self.news = NewsIntelligence()
-        self.fo_fetcher = OptionsChainFetcher()
+        self.fo_fetcher = _build_fo_fetcher()
         self.fo_storage = FOStorage(settings.DB_PATH)
         await self.storage.init()
         await self.fo_storage.init()
         logger.info(f"NSE Stock Bot started | Watching {len(NSE_WATCHLIST)} stocks")
         logger.info(f"Capital: ₹{settings.STARTING_CAPITAL:,.0f} | Max per trade: {settings.MAX_POSITION_PCT:.0%}")
         logger.info("News: MoneyControl + ET + Business Standard + Google News")
-        logger.info("F&O: NIFTY/BANKNIFTY + 20 F&O stocks, paper trading only")
+        backend = "Kite Connect" if _kite_backend_active() else "NSE direct (may be IP-blocked on Railway)"
+        logger.info(f"F&O: NIFTY/BANKNIFTY + 20 F&O stocks, paper trading only | chain backend: {backend}")
 
     async def scan_stock(self, stock: dict) -> Optional[StockSignal]:
         quote = await self.fetcher.get_quote(stock["symbol"])
@@ -1015,12 +1015,8 @@ class StockBotEngine:
         return {"signal": "HOLD", "strength": "WEAK", "confidence": 0.5}
 
     async def _chain_summary_for(self, symbol: str, is_index: bool, expiry: Optional[str] = None):
-        """Thin wrapper so paper_trades_fo can call back into the fetcher/summarizer."""
-        from options_chain import summarize_chain
-        raw = await self.fo_fetcher.fetch_chain(symbol, is_index)
-        if not raw:
-            return None
-        return summarize_chain(raw, expiry)
+        """Backend-agnostic summary: delegates to whichever fetcher is active."""
+        return await self.fo_fetcher.fetch_chain_summary(symbol, is_index, expiry)
 
     async def run_fno_scan(self):
         """Recommend + paper-trade F&O positions based on latest equity signals + live IV."""
@@ -1094,6 +1090,36 @@ class StockBotEngine:
     async def shutdown(self):
         self._running = False
         await self.fetcher.close()
+
+
+# ── F&O backend factory ───────────────────────────────────────────────────────
+def _kite_backend_active() -> bool:
+    """Kite is used when both API key and access token are present in env."""
+    return bool(os.environ.get("KITE_API_KEY", "").strip() and
+                os.environ.get("KITE_ACCESS_TOKEN", "").strip())
+
+
+_FO_FETCHER_SINGLETON = None
+
+
+def _build_fo_fetcher():
+    """Return a Kite fetcher if configured, else the NSE direct fetcher.
+
+    Returns a process-wide singleton for the Kite case so the NFO instruments
+    cache (~100K rows) is shared across requests. NSE fetcher is created per
+    call since it's stateless beyond cookies (and the dashboard close()s it)."""
+    global _FO_FETCHER_SINGLETON
+    if _kite_backend_active():
+        if _FO_FETCHER_SINGLETON is None:
+            try:
+                from kite_client import KiteOptionsChainFetcher
+                _FO_FETCHER_SINGLETON = KiteOptionsChainFetcher()
+            except Exception as e:
+                logger.error(f"Kite fetcher init failed ({e}); falling back to NSE direct")
+        if _FO_FETCHER_SINGLETON is not None:
+            return _FO_FETCHER_SINGLETON
+    from options_chain import OptionsChainFetcher
+    return OptionsChainFetcher()
 
 
 if __name__ == "__main__":

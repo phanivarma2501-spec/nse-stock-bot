@@ -107,6 +107,14 @@ class OptionsChainFetcher:
             logger.debug(f"Options chain fetch failed for {symbol}: {e}")
             return None
 
+    async def fetch_chain_summary(self, symbol: str, is_index: bool, expiry: Optional[str] = None) -> Optional[dict]:
+        """Unified interface: fetch raw chain + summarize in one call.
+        Mirrors KiteOptionsChainFetcher.fetch_chain_summary so callers are backend-agnostic."""
+        raw = await self.fetch_chain(symbol, is_index)
+        if not raw:
+            return None
+        return summarize_chain(raw, expiry)
+
     async def close(self):
         await self._client.aclose()
 
