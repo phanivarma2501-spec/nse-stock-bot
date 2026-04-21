@@ -35,6 +35,7 @@ class Settings(BaseSettings):
     STARTING_CAPITAL: float = 100000.0  # Rs 1 lakh default
     DB_PATH: str = "/app/data/stock_bot.db" if os.environ.get("RAILWAY_ENVIRONMENT") else "data/stock_bot.db"
     SCAN_INTERVAL_MINUTES: int = 60
+    FO_MTM_INTERVAL_MINUTES: int = 5  # Fast F&O mark-to-market loop — closes on target/SL between scans
     MIN_CONFIDENCE: float = 0.55  # lowered from 0.65 — DeepSeek produces lower confidence than Gemini
     MAX_POSITION_PCT: float = 0.05  # 5% per stock
     TRADING_MODES: list = ["swing", "intraday", "positional"]
@@ -1073,6 +1074,15 @@ class StockBotEngine:
     async def run(self):
         self._running = True
         await self.startup()
+        # Main scan (equity + F&O entries, 60 min) runs in parallel with a lightweight
+        # F&O mark-to-market loop (5 min) so open option positions don't bleed waiting
+        # for the hourly scan to close them on target/SL.
+        await asyncio.gather(
+            self._main_scan_loop(),
+            self._fno_mtm_loop(),
+        )
+
+    async def _main_scan_loop(self):
         while self._running:
             if self.is_market_hours():
                 await self.run_scan()
@@ -1082,6 +1092,22 @@ class StockBotEngine:
                 ist = datetime.now(timezone.utc) + timedelta(hours=5, minutes=30)
                 logger.info(f"Market closed (IST: {ist.strftime('%H:%M %A')}). Sleeping 15 min...")
                 await asyncio.sleep(900)
+
+    async def _fno_mtm_loop(self):
+        """Re-price open F&O positions and close on target/SL/expiry. Runs every
+        FO_MTM_INTERVAL_MINUTES independent of the main scan."""
+        logger.info(f"F&O MTM loop started (every {settings.FO_MTM_INTERVAL_MINUTES} min)")
+        while self._running:
+            try:
+                if self.is_market_hours():
+                    closed = await self.fo_storage.mark_and_close(
+                        self.fo_fetcher, None, self._chain_summary_for
+                    )
+                    if closed:
+                        logger.info(f"F&O MTM: closed {closed} position(s) on target/SL/expiry")
+            except Exception as e:
+                logger.error(f"F&O MTM loop iteration failed: {e}")
+            await asyncio.sleep(settings.FO_MTM_INTERVAL_MINUTES * 60)
 
     async def run_once(self):
         await self.startup()
