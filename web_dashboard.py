@@ -10,10 +10,10 @@ from turso_client import connect as turso_connect
 from fastapi.responses import HTMLResponse
 from contextlib import asynccontextmanager
 from stock_bot import Storage, settings
-from paper_trades_fo import FOStorage
+from core.fo_executor import FOExecutor
 
 storage = Storage()
-fo_storage = FOStorage(settings.DB_PATH)
+fo_storage = FOExecutor(settings.DB_PATH)
 
 
 @asynccontextmanager
@@ -152,10 +152,8 @@ async def api_fo_summary():
 
 @app.get("/api/fo-trades/live")
 async def api_fo_live():
-    """Open F&O trades with current premium + unrealized P&L marked against NSE chain."""
-    async def summarize_for(symbol, is_index, expiry):
-        return await _fo_chain_summary(symbol, is_index, expiry)
-    return await fo_storage.mark_open_pnl(summarize_for)
+    """Open F&O trades with current premium + unrealized P&L marked against live chain."""
+    return await fo_storage.mark_open_pnl(_fo_chain_summary)
 
 
 @app.get("/api/fo-trades/closed")
@@ -165,10 +163,14 @@ async def api_fo_closed():
 
 @app.get("/api/fo-signals")
 async def api_fo_signals():
-    """Today's F&O recommendations: runs the strategy engine against current chains
-    for the F&O universe (NIFTY, BANKNIFTY, 20 stocks) using the latest saved equity signal."""
-    from options_chain import INDICES, FNO_STOCKS, compute_pcr, compute_max_pain, iv_rank_in_chain, iv_regime
-    from options_strategy import recommend
+    """Live chain analytics + last saved equity signal per F&O symbol.
+    The actual trade recommendation now comes from the agent pipeline (DeepSeek R1)
+    which runs only during scans — this endpoint shows raw context for the dashboard
+    while the scan produces the actual trades."""
+    from data.options_chain import (
+        INDICES, FNO_STOCKS, compute_pcr, compute_max_pain,
+        iv_rank_in_chain, iv_regime,
+    )
 
     async def latest_signal(symbol):
         async with turso_connect(settings.DB_PATH) as db:
@@ -187,8 +189,7 @@ async def api_fo_signals():
         if not summary:
             continue
         sig = await latest_signal(symbol)
-        rec = recommend(symbol, sig, summary, is_index)
-        row = {
+        out.append({
             "symbol": symbol,
             "is_index": is_index,
             "spot": summary["spot"],
@@ -201,10 +202,19 @@ async def api_fo_signals():
             "expiry": summary["expiry"],
             "equity_signal": sig.get("signal"),
             "equity_strength": sig.get("strength"),
-            "recommendation": rec,  # may be None → "no trade"
-        }
-        out.append(row)
+        })
     return out
+
+
+@app.get("/api/fo-scan-logs")
+async def api_fo_scan_logs():
+    """Recent F&O scan audit rows."""
+    async with turso_connect(settings.DB_PATH) as db:
+        db.row_factory = True
+        async with db.execute(
+            "SELECT * FROM fo_scan_logs ORDER BY scanned_at DESC LIMIT 20"
+        ) as c:
+            return [dict(r) for r in await c.fetchall()]
 
 @app.get("/api/stats")
 async def api_stats():
@@ -521,12 +531,11 @@ DASHBOARD_HTML = """<!DOCTYPE html>
       <tbody id="foOpenBody"></tbody>
     </table>
 
-    <h3 style="padding:16px 16px 4px;color:#c9d1d9;font-size:14px;">Today's Recommendations &amp; Chain Analytics</h3>
+    <h3 style="padding:16px 16px 4px;color:#c9d1d9;font-size:14px;">Chain Analytics (Agent decisions shown in Open/Closed above)</h3>
     <table>
       <thead><tr>
         <th>Symbol</th><th>Spot</th><th>ATM</th><th>ATM IV</th><th>IV Regime</th>
-        <th>IV Rank</th><th>PCR</th><th>Max Pain</th><th>Expiry</th>
-        <th>Equity Sig</th><th>Strategy</th><th>Net Prem</th><th>Target</th><th>SL</th><th>R:R</th>
+        <th>IV Rank</th><th>PCR</th><th>Max Pain</th><th>Expiry</th><th>Equity Sig</th>
       </tr></thead>
       <tbody id="foSignalsBody"></tbody>
     </table>
@@ -738,16 +747,16 @@ async function loadFoOpen() {
       <td><b>${t.symbol}</b></td>
       <td style="font-size:11px">${t.strategy}</td>
       <td>${t.direction||'-'}</td>
-      <td style="font-size:11px">${t.expiry}</td>
+      <td style="font-size:11px">${t.expiry_date}</td>
       <td style="font-size:10px;color:#c9d1d9;max-width:200px;white-space:normal;">${fmtLegs(t.legs_json)}</td>
-      <td>${Number(t.net_premium).toFixed(2)}</td>
-      <td>${t.current_premium!=null?Number(t.current_premium).toFixed(2):'-'}</td>
+      <td>${Number(t.entry_price).toFixed(2)}</td>
+      <td>${t.current_price!=null?Number(t.current_price).toFixed(2):'-'}</td>
       <td style="color:#3fb950">${Number(t.target).toFixed(2)}</td>
       <td style="color:#f85149">${Number(t.stop_loss).toFixed(2)}</td>
-      <td>${INR(t.size_inr)}</td>
+      <td>${INR(t.notional_inr)}</td>
       <td style="color:${pnlColor};font-weight:600">${pnl!=null?(pnl>=0?'+':'')+INR(pnl):'-'}</td>
       <td style="color:${pnlColor};font-size:11px">${pnlPct!=null?(pnlPct>=0?'+':'')+pnlPct.toFixed(2)+'%':'-'}</td>
-      <td style="font-size:11px;color:#8b949e">${fmtDate(t.entered_at)}</td>
+      <td style="font-size:11px;color:#8b949e">${fmtDate(t.opened_at)}</td>
     </tr>`;
   }).join('');
 }
@@ -755,11 +764,9 @@ async function loadFoOpen() {
 async function loadFoSignals() {
   const rows = await (await fetch('/api/fo-signals')).json();
   const tbody = document.getElementById('foSignalsBody');
-  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="15" style="text-align:center;color:#8b949e;padding:20px;">No F&amp;O data — chain fetch may be blocked (Railway IP).</td></tr>'; return; }
+  if (!rows.length) { tbody.innerHTML = '<tr><td colspan="10" style="text-align:center;color:#8b949e;padding:20px;">No F&amp;O chain data — backend may be unavailable.</td></tr>'; return; }
   tbody.innerHTML = rows.map(r => {
-    const rec = r.recommendation;
     const regimeColor = r.iv_regime === 'high' ? '#f85149' : r.iv_regime === 'low' ? '#3fb950' : '#d29922';
-    const stratCell = rec ? `<span style="color:#58a6ff;font-weight:600">${rec.strategy}</span>` : '<span style="color:#8b949e">no trade</span>';
     return `<tr>
       <td><b>${r.symbol}</b></td>
       <td>${Number(r.spot).toFixed(2)}</td>
@@ -771,11 +778,6 @@ async function loadFoSignals() {
       <td>${r.max_pain}</td>
       <td style="font-size:11px">${r.expiry}</td>
       <td><span class="sig ${sigClass(r.equity_signal)}">${r.equity_signal||'-'}</span></td>
-      <td>${stratCell}</td>
-      <td>${rec?Number(rec.net_premium).toFixed(2):'-'}</td>
-      <td style="color:#3fb950">${rec?Number(rec.target).toFixed(2):'-'}</td>
-      <td style="color:#f85149">${rec?Number(rec.stop_loss).toFixed(2):'-'}</td>
-      <td>${rec?rec.risk_reward:'-'}</td>
     </tr>`;
   }).join('');
 }
@@ -788,14 +790,14 @@ async function loadFoClosed() {
     <td>${i+1}</td>
     <td><b>${t.symbol}</b></td>
     <td style="font-size:11px">${t.strategy}</td>
-    <td style="font-size:11px">${t.expiry}</td>
-    <td>${Number(t.net_premium).toFixed(2)}</td>
-    <td>${t.current_premium!=null?Number(t.current_premium).toFixed(2):'-'}</td>
-    <td>${INR(t.size_inr)}</td>
+    <td style="font-size:11px">${t.expiry_date}</td>
+    <td>${Number(t.entry_price).toFixed(2)}</td>
+    <td>${t.current_price!=null?Number(t.current_price).toFixed(2):'-'}</td>
+    <td>${INR(t.notional_inr)}</td>
     <td style="color:${(t.pnl_inr||0)>=0?'#3fb950':'#f85149'}">${t.pnl_inr!=null?(t.pnl_inr>=0?'+':'')+INR(t.pnl_inr):'-'}</td>
     <td>${t.pnl_pct!=null?(t.pnl_pct>=0?'+':'')+t.pnl_pct.toFixed(2)+'%':'-'}</td>
     <td style="font-size:11px;color:#8b949e">${t.close_reason||'-'}</td>
-    <td style="font-size:11px;color:#8b949e">${fmtDate(t.exited_at)}</td>
+    <td style="font-size:11px;color:#8b949e">${fmtDate(t.closed_at)}</td>
   </tr>`).join('');
 }
 

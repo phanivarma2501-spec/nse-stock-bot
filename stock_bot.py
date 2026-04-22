@@ -40,6 +40,16 @@ class Settings(BaseSettings):
     MAX_POSITION_PCT: float = 0.05  # 5% per stock
     TRADING_MODES: list = ["swing", "intraday", "positional"]
 
+    # ── F&O (Level 4 — agent-driven) ──────────────────────────────────────
+    FO_ENABLED: bool = True
+    FO_PAPER_TRADING: bool = True
+    FO_MAX_OPEN_POSITIONS: int = 3
+    FO_SCAN_INTERVAL_HOURS: int = 1
+    FO_MIN_CONFIDENCE: int = 65  # agent confidence 0-100 below this = skip trade
+    FO_MAX_LOTS: int = 2
+    FO_MAX_NOTIONAL_INR: float = 50000.0  # cap per F&O position
+    FO_PLATT_SCALE: float = 0.85  # calibration factor for agent confidence
+
     model_config = ConfigDict(env_file=".env", extra="allow")
 
 settings = Settings()
@@ -920,17 +930,18 @@ class StockBotEngine:
 
     async def startup(self):
         from news_fetcher import NewsIntelligence
-        from paper_trades_fo import FOStorage
+        from core.fo_executor import FOExecutor
         self.news = NewsIntelligence()
         self.fo_fetcher = _build_fo_fetcher()
-        self.fo_storage = FOStorage(settings.DB_PATH)
+        self.fo_storage = FOExecutor(settings.DB_PATH)
         await self.storage.init()
         await self.fo_storage.init()
         logger.info(f"NSE Stock Bot started | Watching {len(NSE_WATCHLIST)} stocks")
         logger.info(f"Capital: ₹{settings.STARTING_CAPITAL:,.0f} | Max per trade: {settings.MAX_POSITION_PCT:.0%}")
         logger.info("News: MoneyControl + ET + Business Standard + Google News")
         backend = "Kite Connect" if _kite_backend_active() else "NSE direct (may be IP-blocked on Railway)"
-        logger.info(f"F&O: NIFTY/BANKNIFTY + 20 F&O stocks, paper trading only | chain backend: {backend}")
+        fo_mode = "AGENT (L4: V3 research + R1 reasoning)" if settings.FO_ENABLED else "DISABLED"
+        logger.info(f"F&O [{fo_mode}] | NIFTY/BANKNIFTY + 20 stocks | chain backend: {backend}")
 
     async def scan_stock(self, stock: dict) -> Optional[StockSignal]:
         quote = await self.fetcher.get_quote(stock["symbol"])
@@ -1020,47 +1031,139 @@ class StockBotEngine:
         return await self.fo_fetcher.fetch_chain_summary(symbol, is_index, expiry)
 
     async def run_fno_scan(self):
-        """Recommend + paper-trade F&O positions based on latest equity signals + live IV."""
-        from options_chain import INDICES, FNO_STOCKS, compute_pcr, compute_max_pain
-        from options_strategy import recommend
+        """Level 4 agent-driven F&O scan: V3 research + R1 reasoning -> paper trade."""
+        if not settings.FO_ENABLED:
+            return
+        from data.options_chain import (
+            INDICES, FNO_STOCKS, compute_pcr, compute_max_pain,
+            iv_rank_in_chain, iv_regime,
+        )
+        from agents.fo_research import research_symbol
+        from agents.fo_reasoning import reason_trade
+        from core.fo_strategy import build_trade
+        from core.fo_kelly import size_in_lots
+        from core.fo_calibration import calibrate
+        from datetime import datetime as _dt
 
-        # First: mark open F&O trades to market and close on target/SL/expiry.
+        # MTM pass first — the dedicated mtm_loop does this every 5 min too,
+        # but running here guarantees fresh state at scan boundary.
         try:
-            closed = await self.fo_storage.mark_and_close(
-                self.fo_fetcher, None, self._chain_summary_for
-            )
+            closed = await self.fo_storage.mark_and_close(self._chain_summary_for)
             if closed:
                 logger.info(f"F&O: closed {closed} position(s) on target/SL/expiry")
         except Exception as e:
             logger.error(f"F&O mark-and-close failed: {e}")
 
         universe = [(s, True) for s in INDICES] + [(s, False) for s in FNO_STOCKS]
-        logger.info(f"=== F&O Scan started - {len(universe)} symbols ===")
+        logger.info(f"=== F&O L4 Scan started - {len(universe)} symbols ===")
+
         opened = 0
+        signals_found = 0
+        errors = 0
+
+        # Look up company names from NSE_WATCHLIST for stock research queries
+        name_map = {s["symbol"]: s["name"] for s in NSE_WATCHLIST}
+
         for symbol, is_index in universe:
             try:
+                # Respect max-open cap
+                open_count = await self.fo_storage.count_open()
+                if open_count >= settings.FO_MAX_OPEN_POSITIONS:
+                    logger.info(f"F&O: max open positions ({open_count}) reached — stop scanning")
+                    break
+
                 summary = await self._chain_summary_for(symbol, is_index)
                 if not summary:
                     logger.debug(f"F&O: chain unavailable for {symbol} — skip")
                     continue
+
                 equity_sig = await self._get_latest_signal(symbol)
-                rec = recommend(symbol, equity_sig, summary, is_index)
-                if not rec:
+                pcr = compute_pcr(summary)
+                max_pain = compute_max_pain(summary)
+                iv_rank = iv_rank_in_chain(summary)
+                regime = iv_regime(summary["atm_iv"], is_index)
+
+                # Days to expiry (expiry string like "28-Apr-2026")
+                try:
+                    exp_d = _dt.strptime(summary["expiry"], "%d-%b-%Y").date()
+                    dte = max((exp_d - _dt.now().date()).days, 0)
+                except ValueError:
+                    dte = 7
+
+                company_name = name_map.get(symbol)
+                research = await research_symbol(symbol, company_name, summary)
+
+                decision, reasoning_text = await reason_trade(
+                    symbol, is_index, equity_sig, summary, research,
+                    pcr, max_pain, iv_rank, dte,
+                )
+
+                if not decision or decision["trade"] != "YES":
                     continue
-                rec["is_index"] = is_index
-                rec["pcr"] = compute_pcr(summary)
-                rec["max_pain"] = compute_max_pain(summary)
-                tid = await self.fo_storage.open_trade(rec)
+
+                signals_found += 1
+                conf_pct = decision["confidence"]
+                if conf_pct < settings.FO_MIN_CONFIDENCE:
+                    logger.debug(f"F&O: {symbol} R1 conf {conf_pct} < min {settings.FO_MIN_CONFIDENCE} — skip")
+                    continue
+
+                # Build trade legs from chain
+                trade = build_trade(
+                    symbol, decision["strategy"], decision["strike"],
+                    summary, conf_pct,
+                )
+                if not trade:
+                    logger.info(f"F&O: {symbol} strategy {decision['strategy']} @ {decision['strike']} "
+                                f"could not be priced (legs missing) — skip")
+                    continue
+
+                # Lot sizing
+                sizing = size_in_lots(
+                    confidence_pct=conf_pct,
+                    net_premium_per_lot=trade["net_premium"] * trade["lot_size"],
+                    lot_size=trade["lot_size"],
+                    min_confidence=settings.FO_MIN_CONFIDENCE,
+                    max_lots=settings.FO_MAX_LOTS,
+                    max_notional_inr=settings.FO_MAX_NOTIONAL_INR,
+                )
+                if sizing["lots"] == 0:
+                    logger.debug(f"F&O: {symbol} sizing returned 0 lots ({sizing.get('reason')})")
+                    continue
+
+                # Calibrate confidence via Platt for ex-post Brier scoring
+                calibrated = calibrate(conf_pct / 100.0, platt_scale=settings.FO_PLATT_SCALE)
+
+                trade.update({
+                    "is_index": is_index,
+                    "expiry_date": summary["expiry"],
+                    "expiry_type": decision["expiry"],
+                    "lots": sizing["lots"],
+                    "notional_inr": sizing.get("notional_inr"),
+                    "confidence": conf_pct,
+                    "edge": round(calibrated - 0.5, 4),  # distance from base rate as edge proxy
+                    "reasoning": reasoning_text,
+                    "equity_signal": equity_sig.get("signal"),
+                    "atm_iv": summary["atm_iv"],
+                    "iv_regime": regime,
+                    "pcr": pcr,
+                    "max_pain": max_pain,
+                })
+                tid = await self.fo_storage.open_trade(trade)
                 if tid:
                     opened += 1
             except Exception as e:
+                errors += 1
                 logger.error(f"F&O error for {symbol}: {e}")
-            await asyncio.sleep(0.8)  # rate limit NSE
-        summary = await self.fo_storage.get_summary()
+            await asyncio.sleep(1.0)
+        portfolio = await self.fo_storage.get_summary()
+        await self.fo_storage.log_scan(
+            symbols=len(universe), signals=signals_found, placed=opened, errors=errors,
+            notes=f"backend={'Kite' if _kite_backend_active() else 'NSE'}",
+        )
         logger.info(
-            f"F&O scan complete | Opened: {opened} | Open: {summary['open']} | "
-            f"Closed: {summary['closed']} | Win rate: {summary['win_rate']:.0%} | "
-            f"P&L: Rs {summary['total_pnl']:+,.0f}"
+            f"F&O L4 scan complete | signals={signals_found} opened={opened} errors={errors} | "
+            f"Total open={portfolio['open']} closed={portfolio['closed']} "
+            f"win_rate={portfolio['win_rate']:.0%} P&L=Rs {portfolio['total_pnl']:+,.0f}"
         )
 
     @staticmethod
@@ -1100,9 +1203,7 @@ class StockBotEngine:
         while self._running:
             try:
                 if self.is_market_hours():
-                    closed = await self.fo_storage.mark_and_close(
-                        self.fo_fetcher, None, self._chain_summary_for
-                    )
+                    closed = await self.fo_storage.mark_and_close(self._chain_summary_for)
                     if closed:
                         logger.info(f"F&O MTM: closed {closed} position(s) on target/SL/expiry")
             except Exception as e:
@@ -1144,7 +1245,7 @@ def _build_fo_fetcher():
                 logger.error(f"Kite fetcher init failed ({e}); falling back to NSE direct")
         if _FO_FETCHER_SINGLETON is not None:
             return _FO_FETCHER_SINGLETON
-    from options_chain import OptionsChainFetcher
+    from data.options_chain import OptionsChainFetcher
     return OptionsChainFetcher()
 
 

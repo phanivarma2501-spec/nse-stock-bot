@@ -1,9 +1,10 @@
 """
 NSE Options Chain fetcher + analytics (IV regime, PCR, max pain, ATM).
 
-Mirrors the cookie/header handling from StockDataFetcher in stock_bot.py.
-Indices: NIFTY, BANKNIFTY via /api/option-chain-indices.
-Stocks:  20 liquid F&O names via /api/option-chain-equities.
+Direct NSE path kept as fallback; Kite Connect (kite_client.py) is the primary
+backend for Railway deployments since NSE geo-blocks cloud IPs.
+
+LOT_SIZES reflect NSE's Dec-2024 revision (Nifty 25->75, BankNifty 15->30, etc.).
 """
 
 import time
@@ -21,19 +22,21 @@ FNO_STOCKS = [
     "ADANIENT", "WIPRO", "HCLTECH", "SUNPHARMA", "ASIANPAINT",
 ]
 
-# Common NSE F&O lot sizes (approximate — NSE revises quarterly).
-# Used only for capital/size display; paper trading doesn't require exactness.
+# NSE F&O lot sizes (revised post Dec-2024). Values for first 10 symbols were
+# provided by user directly; remainder approximated from public sources and
+# should be verified before real-money trading.
 LOT_SIZES = {
-    "NIFTY": 25, "BANKNIFTY": 15,
-    "RELIANCE": 250, "HDFCBANK": 550, "ICICIBANK": 700, "INFY": 400, "TCS": 175,
-    "SBIN": 1500, "AXISBANK": 625, "KOTAKBANK": 400, "ITC": 1600, "LT": 300,
-    "HINDUNILVR": 300, "BHARTIARTL": 475, "MARUTI": 50, "TATAMOTORS": 1425, "BAJFINANCE": 125,
-    "ADANIENT": 300, "WIPRO": 1500, "HCLTECH": 350, "SUNPHARMA": 700, "ASIANPAINT": 200,
+    "NIFTY": 75, "BANKNIFTY": 30,
+    "RELIANCE": 250, "TCS": 150, "INFY": 300, "HDFCBANK": 550,
+    "ICICIBANK": 700, "WIPRO": 3000, "AXISBANK": 1200, "KOTAKBANK": 400,
+    "SBIN": 1500, "ITC": 1600, "LT": 300, "HINDUNILVR": 300,
+    "BHARTIARTL": 475, "MARUTI": 50, "TATAMOTORS": 1425, "BAJFINANCE": 125,
+    "ADANIENT": 300, "HCLTECH": 350, "SUNPHARMA": 700, "ASIANPAINT": 200,
 }
 
 
 class OptionsChainFetcher:
-    """Fetch NSE option chain. Reuses cookie pattern from StockDataFetcher."""
+    """Direct-NSE option-chain fetcher. Works locally; blocked on Railway/GCP (403)."""
 
     INDICES_URL = "https://www.nseindia.com/api/option-chain-indices?symbol={symbol}"
     EQUITY_URL = "https://www.nseindia.com/api/option-chain-equities?symbol={symbol}"
@@ -77,7 +80,6 @@ class OptionsChainFetcher:
             return False
 
     async def fetch_chain(self, symbol: str, is_index: bool) -> Optional[dict]:
-        """Fetch raw NSE option chain. Returns None on failure (IP block, etc.)."""
         if self._blocked:
             return None
         if not await self._refresh_cookies():
@@ -108,8 +110,7 @@ class OptionsChainFetcher:
             return None
 
     async def fetch_chain_summary(self, symbol: str, is_index: bool, expiry: Optional[str] = None) -> Optional[dict]:
-        """Unified interface: fetch raw chain + summarize in one call.
-        Mirrors KiteOptionsChainFetcher.fetch_chain_summary so callers are backend-agnostic."""
+        """Unified interface matching KiteOptionsChainFetcher.fetch_chain_summary."""
         raw = await self.fetch_chain(symbol, is_index)
         if not raw:
             return None
@@ -120,11 +121,7 @@ class OptionsChainFetcher:
 
 
 def summarize_chain(raw: dict, expiry: Optional[str] = None) -> Optional[dict]:
-    """Extract structured summary from raw NSE chain JSON.
-
-    If expiry is None, picks the nearest expiry. Returns dict with:
-      spot, expiry, expiries, atm_strike, atm_iv, strikes (sorted list of dicts with CE/PE data).
-    """
+    """Structured summary of a raw NSE chain JSON."""
     records = raw.get("records", {}) if raw else {}
     data = records.get("data", [])
     expiries = records.get("expiryDates", [])
@@ -153,11 +150,8 @@ def summarize_chain(raw: dict, expiry: Optional[str] = None) -> Optional[dict]:
             "pe_volume": pe.get("totalTradedVolume") or 0,
         })
     strikes.sort(key=lambda s: s["strike"])
-
-    # ATM = strike closest to spot
     atm = min(strikes, key=lambda s: abs(s["strike"] - spot))
     atm_iv = atm["ce_iv"] or atm["pe_iv"] or 0
-
     return {
         "spot": float(spot),
         "expiry": chosen,
@@ -169,14 +163,12 @@ def summarize_chain(raw: dict, expiry: Optional[str] = None) -> Optional[dict]:
 
 
 def compute_pcr(summary: dict) -> float:
-    """Put-Call Ratio based on OI. PCR > 1 = bearish sentiment (more puts)."""
     ce_oi = sum(s["ce_oi"] for s in summary["strikes"])
     pe_oi = sum(s["pe_oi"] for s in summary["strikes"])
     return round(pe_oi / ce_oi, 2) if ce_oi else 0.0
 
 
 def compute_max_pain(summary: dict) -> int:
-    """Strike at which option writers' combined loss is minimized (a.k.a. pin risk)."""
     strikes = summary["strikes"]
     best_strike = strikes[0]["strike"]
     best_loss = float("inf")
@@ -184,9 +176,7 @@ def compute_max_pain(summary: dict) -> int:
         k = candidate["strike"]
         loss = 0.0
         for s in strikes:
-            # ITM call pain at expiry K: max(0, K - strike) * CE OI
             loss += max(0, k - s["strike"]) * s["ce_oi"]
-            # ITM put pain: max(0, strike - K) * PE OI
             loss += max(0, s["strike"] - k) * s["pe_oi"]
         if loss < best_loss:
             best_loss = loss
@@ -195,24 +185,20 @@ def compute_max_pain(summary: dict) -> int:
 
 
 def iv_regime(atm_iv: float, is_index: bool) -> str:
-    """Classify ATM IV as low / neutral / high. Thresholds are coarse (no historical IV rank)."""
     if is_index:
         if atm_iv < 13:
             return "low"
         if atm_iv > 20:
             return "high"
         return "neutral"
-    else:
-        if atm_iv < 22:
-            return "low"
-        if atm_iv > 38:
-            return "high"
-        return "neutral"
+    if atm_iv < 22:
+        return "low"
+    if atm_iv > 38:
+        return "high"
+    return "neutral"
 
 
 def iv_rank_in_chain(summary: dict) -> float:
-    """Percentile rank of ATM IV within the chain's IV distribution.
-    Not a true historical IV rank — proxy only. Returns 0-100."""
     ivs = [s["ce_iv"] for s in summary["strikes"] if s["ce_iv"] > 0]
     ivs += [s["pe_iv"] for s in summary["strikes"] if s["pe_iv"] > 0]
     if not ivs:
@@ -223,8 +209,6 @@ def iv_rank_in_chain(summary: dict) -> float:
 
 
 def pick_strike(summary: dict, offset_steps: int) -> Optional[dict]:
-    """Return strike dict `offset_steps` strikes away from ATM.
-    Positive = above ATM (OTM call / ITM put), negative = below."""
     strikes = summary["strikes"]
     atm_idx = next((i for i, s in enumerate(strikes) if s["strike"] == summary["atm_strike"]), None)
     if atm_idx is None:
@@ -233,3 +217,10 @@ def pick_strike(summary: dict, offset_steps: int) -> Optional[dict]:
     if target < 0 or target >= len(strikes):
         return None
     return strikes[target]
+
+
+def nearest_strike(summary: dict, target_price: float) -> Optional[dict]:
+    """Snap a requested strike price to the nearest listed strike (for agent outputs)."""
+    if not summary.get("strikes"):
+        return None
+    return min(summary["strikes"], key=lambda s: abs(s["strike"] - target_price))
